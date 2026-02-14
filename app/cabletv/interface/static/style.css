@@ -1,0 +1,245 @@
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 20px;
+}
+
+.remote {
+    background: linear-gradient(145deg, #2d2d44, #1f1f30);
+    border-radius: 30px;
+    padding: 30px;
+    box-shadow:
+        0 25px 50px rgba(0, 0, 0, 0.5),
+        inset 0 1px 0 rgba(255, 255, 255, 0.1);
+    max-width: 380px;
+    width: 100%;
+}
+
+.display {
+    background: #0a0a12;
+    border-radius: 15px;
+    padding: 20px;
+    margin-bottom: 25px;
+    border: 2px solid #333;
+}
+
+.channel-number {
+    font-size: 48px;
+    font-weight: bold;
+    color: #00ff88;
+    text-align: center;
+    font-family: 'Courier New', monospace;
+    text-shadow: 0 0 20px rgba(0, 255, 136, 0.5);
+}
+
+.channel-name {
+    font-size: 18px;
+    color: #888;
+    text-align: center;
+    margin-top: 5px;
+}
+
+.now-playing {
+    font-size: 14px;
+    color: #00aaff;
+    text-align: center;
+    margin-top: 10px;
+    min-height: 20px;
+}
+
+.progress-bar {
+    height: 6px;
+    background: #333;
+    border-radius: 3px;
+    margin-top: 15px;
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #00ff88, #00aaff);
+    width: 0%;
+    transition: width 1s linear;
+}
+
+.time-info {
+    font-size: 12px;
+    color: #666;
+    text-align: center;
+    margin-top: 8px;
+}
+
+.controls {
+    display: flex;
+    gap: 20px;
+    margin-bottom: 25px;
+}
+
+.channel-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.btn {
+    background: linear-gradient(145deg, #3d3d5c, #2a2a40);
+    border: none;
+    border-radius: 12px;
+    color: #fff;
+    cursor: pointer;
+    font-size: 16px;
+    transition: all 0.15s ease;
+    box-shadow:
+        0 4px 6px rgba(0, 0, 0, 0.3),
+        inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+.btn:hover {
+    background: linear-gradient(145deg, #4a4a6a, #353550);
+}
+
+.btn:active {
+    transform: translateY(2px);
+    box-shadow:
+        0 2px 3px rgba(0, 0, 0, 0.3),
+        inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+.btn-up, .btn-down {
+    width: 70px;
+    height: 60px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+
+.btn-up .arrow, .btn-down .arrow {
+    font-size: 20px;
+    color: #00ff88;
+}
+
+.btn-up .label, .btn-down .label {
+    font-size: 12px;
+    color: #888;
+}
+
+.number-pad {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    flex: 1;
+}
+
+.btn.num {
+    height: 50px;
+    font-size: 20px;
+    font-weight: bold;
+}
+
+.btn.enter {
+    grid-column: span 2;
+    height: 50px;
+    background: linear-gradient(145deg, #00aa66, #008855);
+    font-weight: bold;
+}
+
+.btn.enter:hover {
+    background: linear-gradient(145deg, #00bb77, #009966);
+}
+
+.channel-list {
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 15px;
+    padding: 15px;
+}
+
+.channel-list h3 {
+    color: #888;
+    font-size: 14px;
+    margin-bottom: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.channels {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.channel-btn {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    padding: 10px;
+    color: #fff;
+    cursor: pointer;
+    text-align: left;
+    transition: all 0.15s ease;
+}
+
+.channel-btn:hover {
+    background: rgba(0, 255, 136, 0.1);
+    border-color: rgba(0, 255, 136, 0.3);
+}
+
+.channel-btn.active {
+    background: rgba(0, 255, 136, 0.2);
+    border-color: #00ff88;
+}
+
+.channel-btn .ch-num {
+    font-weight: bold;
+    color: #00ff88;
+    font-size: 16px;
+}
+
+.channel-btn .ch-name {
+    font-size: 12px;
+    color: #888;
+    margin-top: 2px;
+}
+
+/* Scrollbar styling */
+.channels::-webkit-scrollbar {
+    width: 6px;
+}
+
+.channels::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 3px;
+}
+
+.channels::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 3px;
+}
+
+/* Responsive */
+@media (max-width: 400px) {
+    .remote {
+        padding: 20px;
+    }
+
+    .channel-number {
+        font-size: 36px;
+    }
+
+    .btn.num {
+        height: 45px;
+        font-size: 18px;
+    }
+}

@@ -1,0 +1,163 @@
+# CableTV Simulator Configuration
+
+schedule:
+  # Reference point for schedule calculation (all schedules calculated from this)
+  epoch: "2024-01-01T00:00:00"
+  # Duration of each time slot in minutes
+  slot_duration: 30
+  # Random seed for deterministic scheduling (same seed = same schedule)
+  seed: 42
+
+channels:
+  # --- Lower dial: General/broad channels ---
+  - number: 3
+    name: "Channel 3"
+    tags: ["drama", "comedy", "action"]
+    content_types: ["show", "movie"]
+    commercial_ratio: 0.0
+
+  - number: 5
+    name: "Five Star Movies"
+    tags: ["drama", "action", "thriller", "comedy"]
+    content_types: ["movie"]
+    commercial_ratio: 0.0
+
+  - number: 8
+    name: "Channel 8"
+    tags: ["comedy", "drama", "family"]
+    content_types: ["show", "movie"]
+    commercial_ratio: 0.0
+
+  # --- Teens/20s: Genre-focused ---
+  - number: 12
+    name: "Action Plus"
+    tags: ["action", "adventure", "war"]
+    content_types: ["movie", "show"]
+    commercial_ratio: 0.0
+
+  - number: 15
+    name: "Comedy Gold"
+    tags: ["comedy", "sitcom"]
+    content_types: ["show", "movie"]
+    commercial_ratio: 0.0
+
+  - number: 18
+    name: "The Drama Channel"
+    tags: ["drama", "romance"]
+    content_types: ["show", "movie"]
+    commercial_ratio: 0.0
+
+  - number: 21
+    name: "Fright Night"
+    tags: ["horror", "thriller"]
+    content_types: ["movie", "show"]
+    commercial_ratio: 0.0
+
+  - number: 24
+    name: "Future Vision"
+    tags: ["scifi", "fantasy"]
+    content_types: ["movie", "show"]
+    commercial_ratio: 0.0
+
+  # --- Upper 20s/30s: Family & Specialty ---
+  - number: 27
+    name: "Family Together"
+    tags: ["family", "animation", "comedy"]
+    content_types: ["movie", "show"]
+    commercial_ratio: 0.0
+
+  - number: 30
+    name: "Cartoon Carousel"
+    tags: ["animation", "kids", "family"]
+    content_types: ["movie", "show"]
+    commercial_ratio: 0.0
+
+  - number: 33
+    name: "Kids Corner"
+    tags: ["kids", "family", "animation"]
+    content_types: ["show", "movie"]
+    commercial_ratio: 0.0
+
+  - number: 36
+    name: "Mystery & Suspense"
+    tags: ["mystery", "thriller", "crime"]
+    content_types: ["movie", "show"]
+    commercial_ratio: 0.0
+
+  # --- 40s: Niche genres ---
+  - number: 40
+    name: "True Stories"
+    tags: ["documentary", "history"]
+    content_types: ["movie", "show"]
+    commercial_ratio: 0.0
+
+  - number: 43
+    name: "Classic Cinema"
+    tags: ["classic", "drama", "romance"]
+    content_types: ["movie", "show"]
+    commercial_ratio: 0.0
+
+  - number: 46
+    name: "Western Frontier"
+    tags: ["western", "action", "adventure"]
+    content_types: ["movie", "show"]
+    commercial_ratio: 0.0
+
+  - number: 49
+    name: "War Stories"
+    tags: ["war", "history", "action"]
+    content_types: ["movie", "show"]
+    commercial_ratio: 0.0
+
+  # --- 50s: Premium/specialty ---
+  - number: 52
+    name: "Romance & More"
+    tags: ["romance", "drama", "comedy"]
+    content_types: ["movie", "show"]
+    commercial_ratio: 0.0
+
+  - number: 55
+    name: "Crime Files"
+    tags: ["crime", "mystery", "thriller"]
+    content_types: ["movie", "show"]
+    commercial_ratio: 0.0
+
+  - number: 58
+    name: "After Hours"
+    tags: ["thriller", "horror", "drama"]
+    content_types: ["movie", "show"]
+    commercial_ratio: 0.0
+
+  - number: 62
+    name: "Cinema Showcase"
+    tags: ["drama", "action", "scifi", "classic"]
+    content_types: ["movie"]
+    commercial_ratio: 0.0
+
+ingest:
+  # TMDB API key - get one free at https://www.themoviedb.org/settings/api
+  tmdb_api_key: "YOUR_TMDB_API_KEY_HERE"
+  # Transcode output resolution (4:3 aspect ratio for CRT)
+  transcode_width: 640
+  transcode_height: 480
+  # Bitrate settings
+  video_bitrate: "1500k"
+  audio_bitrate: "128k"
+  # Keyframe interval for fast seeking (every N frames)
+  keyframe_interval: 30
+
+playback:
+  # mpv IPC port for control
+  mpv_ipc_port: 9876
+  # How long to show channel OSD when switching (seconds)
+  osd_duration: 2.0
+  # Default channel on startup
+  default_channel: 3
+
+web:
+  # Web interface bind address (0.0.0.0 for all interfaces)
+  host: "0.0.0.0"
+  # Web interface port
+  port: 5000
+  # Enable debug mode (disable in production)
+  debug: false

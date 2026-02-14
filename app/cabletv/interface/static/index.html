@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>CableTV Remote</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="remote">
+        <div class="display">
+            <div class="channel-number" id="channel-number">--</div>
+            <div class="channel-name" id="channel-name">No Signal</div>
+            <div class="now-playing" id="now-playing"></div>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progress-fill"></div>
+            </div>
+            <div class="time-info" id="time-info"></div>
+        </div>
+
+        <div class="controls">
+            <div class="channel-buttons">
+                <button class="btn btn-up" id="btn-up" title="Channel Up">
+                    <span class="arrow">&#9650;</span>
+                    <span class="label">CH</span>
+                </button>
+                <button class="btn btn-down" id="btn-down" title="Channel Down">
+                    <span class="arrow">&#9660;</span>
+                    <span class="label">CH</span>
+                </button>
+            </div>
+
+            <div class="number-pad">
+                <button class="btn num" data-num="1">1</button>
+                <button class="btn num" data-num="2">2</button>
+                <button class="btn num" data-num="3">3</button>
+                <button class="btn num" data-num="4">4</button>
+                <button class="btn num" data-num="5">5</button>
+                <button class="btn num" data-num="6">6</button>
+                <button class="btn num" data-num="7">7</button>
+                <button class="btn num" data-num="8">8</button>
+                <button class="btn num" data-num="9">9</button>
+                <button class="btn num" data-num="0">0</button>
+                <button class="btn enter" id="btn-enter">GO</button>
+            </div>
+        </div>
+
+        <div class="channel-list" id="channel-list">
+            <h3>Channels</h3>
+            <div class="channels" id="channels"></div>
+        </div>
+    </div>
+
+    <script src="/remote.js"></script>
+</body>
+</html>
