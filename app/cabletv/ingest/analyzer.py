@@ -82,7 +82,7 @@ def find_break_points(
     black_frames: list[dict],
     duration: float,
     min_gap: float = 300.0,  # 5 minutes between breaks
-    edge_margin: float = 120.0  # 2 minutes from start/end
+    edge_margin: float = 30.0  # 30 seconds from start/end
 ) -> list[float]:
     """
     Find likely commercial break points from black frames.

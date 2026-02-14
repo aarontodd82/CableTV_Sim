@@ -67,9 +67,8 @@ def validate_content(content_id: int, config: Config, verbose: bool = True) -> b
 
             if verbose:
                 print(f"  Validated: {video_path.name}")
-                print(f"  Duration: {probe.duration:.1f}s")
-                print(f"  Resolution: {probe.width}x{probe.height}")
 
+            log_ingest(conn, "validate", "completed", content_id)
             return True
 
         except Exception as e:
@@ -98,8 +97,21 @@ def register_all(config: Config, verbose: bool = True) -> dict:
     with db_connection() as conn:
         log_ingest(conn, "register", "started", message="Final validation")
 
-        # Check content that's marked as ready
-        content_list = get_content_by_status(conn, "ready")
+        # Only validate newly ready content (from this pipeline run, not previously ready)
+        # The analyze step marks items as "ready", so check for items
+        # that were just processed (have no validation log entry yet)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT c.* FROM content c
+            WHERE c.status = 'ready'
+            AND c.id NOT IN (
+                SELECT DISTINCT content_id FROM ingest_log
+                WHERE stage = 'validate' AND status = 'completed'
+                AND content_id IS NOT NULL
+            )
+            ORDER BY c.id
+        """)
+        content_list = cursor.fetchall()
 
         if verbose:
             print(f"Validating {len(content_list)} ready items")
@@ -159,6 +171,7 @@ def run_full_pipeline(
     skip_tmdb: bool = False,
     skip_transcode: bool = False,
     skip_analyze: bool = False,
+    use_ai: bool = True,
     verbose: bool = True
 ) -> dict:
     """
@@ -192,10 +205,13 @@ def run_full_pipeline(
     # Stage 2: Identify
     if verbose:
         print("\n" + "=" * 50)
-        print("STAGE 2: TMDB identification")
+        print("STAGE 2: Content identification")
         print("=" * 50)
     if skip_tmdb:
         all_stats["identify"] = skip_identification(verbose=verbose)
+    elif use_ai:
+        from .ai_identifier import ai_identify_content
+        all_stats["identify"] = ai_identify_content(config, verbose=verbose)
     else:
         all_stats["identify"] = identify_content(config, auto=auto, verbose=verbose)
 

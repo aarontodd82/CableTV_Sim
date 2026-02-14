@@ -78,6 +78,12 @@ channels:
     content_types: ["show", "movie"]
     commercial_ratio: 0.0
 
+  - number: 35
+    name: "Music Television"
+    tags: ["music"]
+    content_types: ["show", "movie"]
+    commercial_ratio: 0.0
+
   - number: 36
     name: "Mystery & Suspense"
     tags: ["mystery", "thriller", "crime"]
@@ -89,6 +95,18 @@ channels:
     name: "True Stories"
     tags: ["documentary", "history"]
     content_types: ["movie", "show"]
+    commercial_ratio: 0.0
+
+  - number: 42
+    name: "The Arena"
+    tags: ["gameshow", "sports"]
+    content_types: ["show"]
+    commercial_ratio: 0.0
+
+  - number: 44
+    name: "Discovery Zone"
+    tags: ["educational", "documentary"]
+    content_types: ["show", "movie"]
     commercial_ratio: 0.0
 
   - number: 43
@@ -136,15 +154,23 @@ channels:
 
 ingest:
   # TMDB API key - get one free at https://www.themoviedb.org/settings/api
-  tmdb_api_key: "YOUR_TMDB_API_KEY_HERE"
+  tmdb_api_key: "5de25704c96ce85f5c47b46a4a37fdf6"
+  # Anthropic API key for AI-powered content identification
+  # Get one at https://console.anthropic.com/settings/keys
+  # Or set ANTHROPIC_API_KEY environment variable
+  anthropic_api_key: "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"
   # Transcode output resolution (4:3 aspect ratio for CRT)
   transcode_width: 640
   transcode_height: 480
   # Bitrate settings
-  video_bitrate: "1500k"
+  video_bitrate: "750k"
   audio_bitrate: "128k"
   # Keyframe interval for fast seeking (every N frames)
   keyframe_interval: 30
+  # Crop percentage for widescreen (16:9) content on 4:3 display
+  # 0 = full letterbox (black bars top/bottom), 12 = moderate crop (smaller bars),
+  # 25 = full crop to 4:3 (no bars, loses ~25% of sides)
+  widescreen_crop: 7
 
 playback:
   # mpv IPC port for control

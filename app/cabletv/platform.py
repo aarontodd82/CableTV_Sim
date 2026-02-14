@@ -66,15 +66,16 @@ def get_drive_root() -> Path:
 
 def get_mpv_ipc_address() -> str:
     """
-    Get mpv IPC address - using TCP for cross-platform compatibility.
-    Returns TCP address in format for mpv --input-ipc-server
+    Get mpv IPC address.
+    Windows: named pipe, Linux/Mac: TCP socket.
     """
-    # Use TCP socket on all platforms for simplicity
+    if sys.platform == "win32":
+        return r"\\.\pipe\cabletv-mpv"
     return "tcp://127.0.0.1:9876"
 
 
 def get_mpv_ipc_connect() -> tuple[str, int]:
-    """Get host and port for connecting to mpv IPC."""
+    """Get host and port for connecting to mpv IPC (TCP only, used on Linux/Mac)."""
     return ("127.0.0.1", 9876)
 
 
@@ -129,6 +130,7 @@ def get_mpv_path() -> str:
 
     if sys.platform == "win32":
         common_paths = [
+            Path(r"C:\Users\Aaron\Downloads\mpv-x86_64-20260214-git-1a160f9\installer\mpv.exe"),
             Path(os.environ.get("PROGRAMFILES", "")) / "mpv" / "mpv.exe",
             Path(os.environ.get("LOCALAPPDATA", "")) / "mpv" / "mpv.exe",
             Path("C:/mpv/mpv.exe"),

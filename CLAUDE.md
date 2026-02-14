@@ -110,7 +110,7 @@ Status workflow: scanned → identified → transcoded → ready
 ## Running
 
 ```bash
-cd C:\Users\aaron\OneDrive\Documents\CableTV_Sim\app
+cd C:\Users\Aaron\Documents\CableTV_Sim\app
 python -m cabletv start           # Full system
 python -m cabletv start --windowed
 python -m cabletv stats
@@ -118,16 +118,190 @@ python -m cabletv schedule now
 python -m cabletv ingest all --skip-tmdb --skip-transcode --skip-analyze
 ```
 
+## Content Ingest Workflow
+
+### Adding New Content
+
+When the user adds new video files and wants them ingested, follow this workflow step by step. **The user must see and confirm the output at each step.** Always paste the full CLI output in your response — never summarize or skip it.
+
+#### Step 1: Scan
+
+```bash
+cd C:\Users\Aaron\Documents\CableTV_Sim\app
+python -m cabletv ingest scan
+```
+
+Show the user the count of files added/skipped/errors. Confirm before proceeding.
+
+#### Step 2: AI Identify
+
+```bash
+python -m cabletv ingest identify
+```
+
+This uses Claude AI + TMDB to identify all `scanned` content automatically. It prints a review table at the end:
+
+```
+==========================================================================================
+IDENTIFICATION REVIEW
+==========================================================================================
+   ID  Status  Type    Title                                     Tags
+------------------------------------------------------------------------------------------
+   12  OK      show    Breaking Bad S01E01                       drama, crime, thriller
+   45  OK      movie   The Matrix (1999)                         action, scifi, thriller
+------------------------------------------------------------------------------------------
+```
+
+**Paste the full review table for the user.** Ask them to review it and confirm everything looks correct before continuing. If anything is wrong, fix it before proceeding (see "Fixing Misidentified Content" below).
+
+Use `--no-ai` to fall back to the old regex+TMDB method if needed.
+
+#### Step 3: Transcode
+
+```bash
+python -m cabletv ingest transcode
+```
+
+Or `--skip` to use originals as-is. Show the user progress and results.
+
+#### Step 4: Analyze
+
+```bash
+python -m cabletv ingest analyze
+```
+
+Or `--skip` to skip break point detection. Show the user progress and results.
+
+#### Step 5: Validate
+
+Final validation happens automatically as part of the pipeline. Or run the full pipeline at once:
+
+```bash
+python -m cabletv ingest all          # AI identify (default)
+python -m cabletv ingest all --no-ai  # regex+TMDB identify
+```
+
+### Fixing Misidentified Content
+
+#### Edit metadata directly
+
+```bash
+python -m cabletv content edit <id> --title "Correct Title" --tags "drama,comedy"
+python -m cabletv content edit <id> --type show --series "Show Name" --season 2 --episode 5
+python -m cabletv content edit <id> --year 1995
+```
+
+All flags are optional — only the ones specified get changed. `--tags` replaces ALL tags at once (comma-separated).
+
+#### Re-identify from scratch
+
+```bash
+python -m cabletv content reset 12 13 45       # reset specific IDs back to "scanned"
+python -m cabletv ingest identify               # re-runs AI on those items
+```
+
+Reset clears tags and sets status back to `scanned`. Only `scanned` items get processed by identify, so already-done content is never touched.
+
+### Checking Content
+
+```bash
+python -m cabletv content search "matrix"       # search by title, series name, or filename
+python -m cabletv content search "matrix" -v    # verbose: also shows tags and series info
+python -m cabletv content list                  # all ready content
+python -m cabletv content list --status scanned # by status
+python -m cabletv content list --type movie     # by type
+python -m cabletv content show <id>             # full details for one item
+python -m cabletv stats                         # tag counts, totals
+```
+
+When the user asks "do we have X?" — use `content search` and show them the output. It searches title, series name, and original filename (case-insensitive).
+
+### Important Notes
+
+- Status is tracked in the SQLite database, not on files. Deleting originals after ingest is fine.
+- `original_path` is stored as a string — the AI identifier reads it for filename context, never opens the file.
+- Content goes through: scanned → identified → transcoded → ready
+- Only `scanned` content is picked up by `identify`. Already-identified/ready content is skipped.
+- Valid tags: action, adventure, animation, comedy, crime, documentary, drama, educational, family, fantasy, gameshow, history, horror, kids, music, mystery, romance, scifi, thriller, war, western, classic, sitcom, cult, sports
+- Tags must match channel config tags or content won't appear on any channel.
+
+### Post-Ingest Verification
+
+After content finishes the pipeline (all stages complete), always run these checks and show the user the output:
+
+1. **`python -m cabletv stats`** — verify tag distribution makes sense. If a tag has 0 content but a channel uses it, flag it to the user.
+2. **`python -m cabletv schedule check-collisions`** — check the same content isn't on two channels at once. Show results.
+
+### Tag-Channel Alignment
+
+Content ONLY appears on a channel if it has at least one tag matching that channel's tags AND a matching content_type. After identification, check that no content is "orphaned" (has tags that don't match any channel).
+
+Current channel tag coverage:
+- action: Ch3, 5, 12, 46, 49, 62
+- adventure: Ch12, 46
+- animation: Ch27, 30, 33
+- comedy: Ch3, 5, 8, 15, 27, 52
+- crime: Ch36, 55
+- classic: Ch43, 62
+- documentary: Ch40, 44
+- drama: Ch3, 5, 8, 18, 43, 52, 58, 62
+- educational: Ch44
+- family: Ch8, 27, 30, 33
+- fantasy: Ch24
+- gameshow: Ch42
+- history: Ch40, 49
+- horror: Ch21, 58
+- kids: Ch30, 33
+- music: Ch35
+- mystery: Ch36, 55
+- romance: Ch18, 43, 52
+- scifi: Ch24, 62
+- sitcom: Ch15
+- sports: Ch42
+- thriller: Ch5, 21, 36, 55, 58
+- war: Ch12, 49
+- western: Ch46
+
+Tags with NO channel: cult. Content with only this tag will never appear. If the AI assigns only "cult", add a covered tag too or flag it to the user.
+
+Movies-only channels: Ch5 (Five Star Movies), Ch62 (Cinema Showcase). Don't let shows end up with tags that only match these channels unless they're actually movies.
+
+### Channel Configuration
+
+There is no CLI for channel config. To add/change/remove channels, edit `config.yaml` directly. Always show the user the change before saving. Key fields:
+- `number`: channel number (what the user tunes to)
+- `name`: display name
+- `tags`: list of tags — content with ANY matching tag can appear
+- `content_types`: list of "movie", "show" — filters what type appears
+- `commercial_ratio`: 0.0 = no commercials, 0.2 = 20% commercial time
+
+### Starting the System
+
+`python -m cabletv start` is a **long-running blocking command** (starts mpv + web server). Run it in the background if needed, or warn the user it will block the terminal. Use `--windowed` for development/testing.
+
+## IMPORTANT: Showing Output to the User
+
+**This applies to ALL cabletv CLI commands, not just ingest.**
+
+When running any `python -m cabletv` command:
+1. Always run directly via Bash (never in background agents or subagents)
+2. Always paste the full output in your text response to the user
+3. For ingest steps, wait for user confirmation before proceeding to the next step
+4. If output is long (e.g. content list with hundreds of items), show the full output — let the user decide what to focus on
+5. When editing content (edit/tag/reset), show the confirmation output so the user sees what changed
+
 ## Implementation Status
 
 ### Complete
 - Deterministic schedule engine with timeline-based commercial breaks
 - 5-stage ingest pipeline (scan, identify, transcode, analyze, register)
+- AI-powered content identification (Claude API + TMDB tool use)
 - Smart commercial selection (fits duration, handles gaps)
 - "Coming Up Next" bumpers (8s, up to 3 per slot, deterministic placement)
 - mpv playback with segment transitions (content, commercial, up_next)
 - Web remote control
 - 20 channels configured
+- Content edit/reset CLI commands for fixing misidentifications
 
 ### Not Implemented
 - Guide channel (Prevue-style scrolling grid)

@@ -177,6 +177,8 @@ def init_database(db_path: Optional[Path] = None) -> None:
             ("sitcom", "Situation comedy"),
             ("cult", "Cult classics"),
             ("sports", "Sports programming"),
+            ("gameshow", "Game shows and physical competitions"),
+            ("educational", "Science, nature, and learning content"),
         ]
         cursor.executemany(
             "INSERT OR IGNORE INTO tags (name, description) VALUES (?, ?)",
@@ -249,6 +251,18 @@ def get_ready_content(conn: sqlite3.Connection, content_type: Optional[str] = No
         )
     else:
         cursor.execute("SELECT * FROM content WHERE status = 'ready' ORDER BY title")
+    return cursor.fetchall()
+
+
+def search_content(conn: sqlite3.Connection, query: str) -> list[sqlite3.Row]:
+    """Search content by title, series name, or original filename (case-insensitive)."""
+    cursor = conn.cursor()
+    pattern = f"%{query}%"
+    cursor.execute("""
+        SELECT * FROM content
+        WHERE title LIKE ? OR series_name LIKE ? OR original_path LIKE ?
+        ORDER BY title
+    """, (pattern, pattern, pattern))
     return cursor.fetchall()
 
 
@@ -383,6 +397,12 @@ def remove_tag_from_content(conn: sqlite3.Connection, content_id: int, tag_name:
         DELETE FROM content_tags
         WHERE content_id = ? AND tag_id = (SELECT id FROM tags WHERE name = ?)
     """, (content_id, tag_name.lower()))
+
+
+def clear_content_tags(conn: sqlite3.Connection, content_id: int) -> None:
+    """Remove all tags from content."""
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM content_tags WHERE content_id = ?", (content_id,))
 
 
 # Break point operations

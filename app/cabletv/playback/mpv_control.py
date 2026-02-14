@@ -1,28 +1,33 @@
-"""mpv IPC controller using TCP socket."""
+"""mpv IPC controller using named pipes (Windows) or TCP socket (Linux/Mac)."""
 
 import json
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Optional, Any
 
 from ..config import Config
-from ..platform import get_mpv_path, get_mpv_ipc_connect, configure_display
+from ..platform import get_mpv_path, get_mpv_ipc_address, get_mpv_ipc_connect, configure_display
 
 
 class MpvController:
     """
     Controller for mpv media player via IPC.
 
-    Uses TCP socket for cross-platform compatibility.
+    Uses named pipes on Windows, TCP socket on Linux/Mac.
     """
 
     def __init__(self, config: Config):
         self.config = config
-        self.host, self.port = get_mpv_ipc_connect()
+        self._ipc_address = get_mpv_ipc_address()
+        self._use_pipe = sys.platform == "win32"
+        if not self._use_pipe:
+            self.host, self.port = get_mpv_ipc_connect()
         self._process: Optional[subprocess.Popen] = None
         self._socket: Optional[socket.socket] = None
+        self._pipe = None  # Windows named pipe file handle
         self._request_id = 0
 
     @property
@@ -33,6 +38,8 @@ class MpvController:
     @property
     def is_connected(self) -> bool:
         """Check if connected to mpv IPC."""
+        if self._use_pipe:
+            return self._pipe is not None
         return self._socket is not None
 
     def start(self, fullscreen: bool = True) -> bool:
@@ -53,7 +60,7 @@ class MpvController:
 
         cmd = [
             mpv_path,
-            f"--input-ipc-server=tcp://127.0.0.1:{self.port}",
+            f"--input-ipc-server={self._ipc_address}",
             "--idle=yes",
             "--force-window=yes",
             "--keep-open=yes",
@@ -61,9 +68,12 @@ class MpvController:
             "--osd-duration=2000",
         ]
 
-        # Add fullscreen if requested
+        # Add fullscreen or fixed window size
         if fullscreen:
             cmd.append("--fullscreen")
+        else:
+            cmd.append("--geometry=640x480")
+            cmd.append("--autofit-smaller=640x480")
 
         # Add platform-specific options
         if display_config.get("video_output"):
@@ -98,7 +108,13 @@ class MpvController:
             return False
 
     def _connect(self) -> bool:
-        """Connect to mpv IPC socket."""
+        """Connect to mpv IPC."""
+        if self._use_pipe:
+            return self._connect_pipe()
+        return self._connect_tcp()
+
+    def _connect_tcp(self) -> bool:
+        """Connect via TCP socket."""
         try:
             self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self._socket.settimeout(5.0)
@@ -107,6 +123,50 @@ class MpvController:
         except (socket.error, ConnectionRefusedError):
             self._socket = None
             return False
+
+    def _connect_pipe(self) -> bool:
+        """Connect via Windows named pipe."""
+        try:
+            self._pipe = open(self._ipc_address, "r+b", buffering=0)
+            return True
+        except OSError:
+            self._pipe = None
+            return False
+
+    def _read_pipe_response(self, timeout: float = 3.0) -> Optional[dict]:
+        """
+        Read a JSON response from the named pipe, skipping mpv event messages.
+
+        Reads byte-by-byte (required for unbuffered named pipe) and parses
+        complete JSON lines. Skips mpv event notifications that don't have
+        a request_id.
+        """
+        deadline = time.time() + timeout
+        buf = b""
+        while time.time() < deadline:
+            try:
+                b = self._pipe.read(1)
+            except OSError:
+                self._pipe = None
+                return None
+            if not b:
+                continue
+            buf += b
+            if b == b"\n":
+                line = buf.decode("utf-8", errors="replace").strip()
+                buf = b""
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                # Skip mpv event messages (they lack request_id)
+                if "event" in data and "request_id" not in data:
+                    continue
+                if data.get("request_id") == self._request_id:
+                    return data
+        return None
 
     def _send_command(self, command: list, wait_response: bool = True) -> Optional[dict]:
         """
@@ -131,34 +191,43 @@ class MpvController:
 
         try:
             message = json.dumps(request) + "\n"
-            self._socket.sendall(message.encode("utf-8"))
 
-            if wait_response:
-                # Read response
-                response_data = b""
-                while True:
-                    chunk = self._socket.recv(4096)
-                    if not chunk:
-                        break
-                    response_data += chunk
-                    if b"\n" in response_data:
-                        break
+            if self._use_pipe:
+                self._pipe.write(message.encode("utf-8"))
+                self._pipe.flush()
+                if wait_response:
+                    return self._read_pipe_response()
+                return None
+            else:
+                self._socket.sendall(message.encode("utf-8"))
 
-                # Parse response (may have multiple lines)
-                for line in response_data.decode("utf-8").strip().split("\n"):
-                    if line:
-                        try:
-                            response = json.loads(line)
-                            if response.get("request_id") == self._request_id:
-                                return response
-                        except json.JSONDecodeError:
-                            continue
+                if wait_response:
+                    response_data = b""
+                    while True:
+                        chunk = self._socket.recv(4096)
+                        if not chunk:
+                            break
+                        response_data += chunk
+                        if b"\n" in response_data:
+                            break
 
-            return None
+                    for line in response_data.decode("utf-8").strip().split("\n"):
+                        if line:
+                            try:
+                                response = json.loads(line)
+                                if response.get("request_id") == self._request_id:
+                                    return response
+                            except json.JSONDecodeError:
+                                continue
 
-        except socket.error as e:
+                return None
+
+        except (socket.error, OSError) as e:
             print(f"IPC error: {e}")
-            self._socket = None
+            if self._use_pipe:
+                self._pipe = None
+            else:
+                self._socket = None
             return None
 
     def _get_property(self, name: str) -> Any:
@@ -189,12 +258,17 @@ class MpvController:
         if response is None:
             return False
 
-        # Wait a moment for file to load
-        time.sleep(0.3)
-
-        # Seek if needed
+        # Wait for file to actually load before seeking
         if seek_seconds > 0:
+            # Poll until mpv reports a playback position (file is loaded)
+            for _ in range(30):  # Up to 3 seconds
+                time.sleep(0.1)
+                pos = self._get_property("time-pos")
+                if pos is not None:
+                    break
             self.seek(seek_seconds)
+        else:
+            time.sleep(0.2)
 
         return True
 
@@ -280,11 +354,19 @@ class MpvController:
 
     def shutdown(self) -> None:
         """Shutdown mpv completely."""
-        if self._socket:
+        try:
+            self._send_command(["quit"], wait_response=False)
+        except Exception:
+            pass
+
+        if self._pipe:
             try:
-                self._send_command(["quit"], wait_response=False)
+                self._pipe.close()
             except Exception:
                 pass
+            self._pipe = None
+
+        if self._socket:
             try:
                 self._socket.close()
             except Exception:

@@ -25,7 +25,7 @@ def cmd_ingest_scan(args):
 
 
 def cmd_ingest_identify(args):
-    """Identify content via TMDB."""
+    """Identify content via AI or TMDB."""
     from .config import load_config
     from .db import init_database
     from .ingest.identifier import identify_content, skip_identification
@@ -35,6 +35,9 @@ def cmd_ingest_identify(args):
 
     if args.skip:
         skip_identification(verbose=True)
+    elif not args.no_ai:
+        from .ingest.ai_identifier import ai_identify_content
+        ai_identify_content(config, verbose=True)
     else:
         identify_content(config, auto=args.auto, verbose=True)
 
@@ -83,6 +86,7 @@ def cmd_ingest_all(args):
         skip_tmdb=args.skip_tmdb,
         skip_transcode=args.skip_transcode,
         skip_analyze=args.skip_analyze,
+        use_ai=not args.no_ai,
         verbose=True
     )
 
@@ -121,6 +125,36 @@ def cmd_content_list(args):
         print(f"{content['id']:>4}  {content['content_type']:10}  {duration:>10}  {content['title']}")
 
     print(f"\nTotal: {len(content_list)} items")
+
+
+def cmd_content_search(args):
+    """Search content by title or filename."""
+    from .db import init_database, db_connection, search_content, get_content_tags
+    from .utils.time_utils import duration_to_hms
+
+    init_database()
+
+    with db_connection() as conn:
+        results = search_content(conn, args.query)
+
+        if not results:
+            print(f"No content matching \"{args.query}\"")
+            return
+
+        print(f"\n{'ID':>4}  {'Type':10}  {'Status':10}  {'Duration':>10}  Title")
+        print("-" * 80)
+
+        for content in results:
+            duration = duration_to_hms(content["duration_seconds"])
+            print(f"{content['id']:>4}  {content['content_type']:10}  {content['status']:10}  {duration:>10}  {content['title']}")
+            if args.verbose:
+                tags = get_content_tags(conn, content["id"])
+                if tags:
+                    print(f"      Tags: {', '.join(tags)}")
+                if content["series_name"]:
+                    print(f"      Series: {content['series_name']}  S{content['season'] or '?'}E{content['episode'] or '?'}")
+
+        print(f"\nFound: {len(results)} items matching \"{args.query}\"")
 
 
 def cmd_content_show(args):
@@ -184,6 +218,84 @@ def cmd_content_tag(args):
         else:
             add_tag_to_content(conn, args.id, args.tag)
             print(f"Added tag '{args.tag}' to content {args.id}")
+
+
+def cmd_content_edit(args):
+    """Edit metadata for a content item."""
+    from .db import (
+        init_database, db_connection, get_content_by_id,
+        update_content_metadata, add_tag_to_content, clear_content_tags, get_content_tags
+    )
+
+    init_database()
+
+    with db_connection() as conn:
+        content = get_content_by_id(conn, args.id)
+        if not content:
+            print(f"Content ID {args.id} not found")
+            return
+
+        # Update metadata fields
+        update_content_metadata(
+            conn, args.id,
+            title=args.title,
+            series_name=args.series,
+            season=args.season,
+            episode=args.episode,
+            year=args.year,
+        )
+
+        # Update content_type if provided
+        if args.type:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE content SET content_type = ?, updated_at = datetime('now') WHERE id = ?",
+                (args.type, args.id)
+            )
+
+        # Replace tags if --tags provided
+        if args.tags is not None:
+            clear_content_tags(conn, args.id)
+            if args.tags:  # not empty string
+                for tag in args.tags.split(","):
+                    tag = tag.strip().lower()
+                    if tag:
+                        add_tag_to_content(conn, args.id, tag)
+
+        # Show updated content
+        content = get_content_by_id(conn, args.id)
+        tags = get_content_tags(conn, args.id)
+        print(f"Updated content {args.id}:")
+        print(f"  Title: {content['title']}")
+        print(f"  Type: {content['content_type']}")
+        if content['series_name']:
+            print(f"  Series: {content['series_name']}")
+        if content['season']:
+            print(f"  Season: {content['season']}, Episode: {content['episode']}")
+        if content['year']:
+            print(f"  Year: {content['year']}")
+        if tags:
+            print(f"  Tags: {', '.join(tags)}")
+
+
+def cmd_content_reset(args):
+    """Reset content back to scanned for re-identification."""
+    from .db import init_database, db_connection, get_content_by_id, update_content_status, clear_content_tags
+
+    init_database()
+
+    with db_connection() as conn:
+        for content_id in args.ids:
+            content = get_content_by_id(conn, content_id)
+            if not content:
+                print(f"Content ID {content_id} not found, skipping")
+                continue
+
+            clear_content_tags(conn, content_id)
+            update_content_status(conn, content_id, "scanned")
+            print(f"Reset ID {content_id}: {content['title']} -> scanned (tags cleared)")
+
+    print(f"\nRun 'cabletv ingest identify' to re-identify these items")
 
 
 def cmd_schedule_now(args):
@@ -308,11 +420,13 @@ def main():
     scan_parser.set_defaults(func=cmd_ingest_scan)
 
     # ingest identify
-    identify_parser = ingest_sub.add_parser("identify", help="Identify via TMDB")
+    identify_parser = ingest_sub.add_parser("identify", help="Identify content")
     identify_parser.add_argument("--auto", "-a", action="store_true",
-                                 help="Auto-accept high-confidence matches")
+                                 help="Auto-accept high-confidence matches (regex mode)")
     identify_parser.add_argument("--skip", action="store_true",
                                  help="Skip identification stage")
+    identify_parser.add_argument("--no-ai", action="store_true",
+                                 help="Use regex+TMDB instead of AI identification")
     identify_parser.set_defaults(func=cmd_ingest_identify)
 
     # ingest transcode
@@ -334,13 +448,15 @@ def main():
     # ingest all
     all_parser = ingest_sub.add_parser("all", help="Run full pipeline")
     all_parser.add_argument("--auto", "-a", action="store_true",
-                            help="Auto-accept TMDB matches")
+                            help="Auto-accept TMDB matches (regex mode)")
     all_parser.add_argument("--skip-tmdb", action="store_true",
                             help="Skip TMDB identification")
     all_parser.add_argument("--skip-transcode", action="store_true",
                             help="Skip transcoding")
     all_parser.add_argument("--skip-analyze", action="store_true",
                             help="Skip black-frame analysis")
+    all_parser.add_argument("--no-ai", action="store_true",
+                            help="Use regex+TMDB instead of AI identification")
     all_parser.set_defaults(func=cmd_ingest_all)
 
     # ingest status
@@ -358,6 +474,13 @@ def main():
     list_parser.add_argument("--status", "-s", help="Filter by status")
     list_parser.set_defaults(func=cmd_content_list)
 
+    # content search
+    search_parser = content_sub.add_parser("search", help="Search content by title or filename")
+    search_parser.add_argument("query", help="Search term")
+    search_parser.add_argument("--verbose", "-v", action="store_true",
+                               help="Show tags and series info")
+    search_parser.set_defaults(func=cmd_content_search)
+
     # content show
     show_parser = content_sub.add_parser("show", help="Show content details")
     show_parser.add_argument("id", type=int, help="Content ID")
@@ -370,6 +493,24 @@ def main():
     tag_parser.add_argument("--remove", "-r", action="store_true",
                             help="Remove tag instead of adding")
     tag_parser.set_defaults(func=cmd_content_tag)
+
+    # content edit
+    edit_parser = content_sub.add_parser("edit", help="Edit content metadata")
+    edit_parser.add_argument("id", type=int, help="Content ID")
+    edit_parser.add_argument("--title", help="Set title")
+    edit_parser.add_argument("--series", help="Set series name")
+    edit_parser.add_argument("--season", type=int, help="Set season number")
+    edit_parser.add_argument("--episode", type=int, help="Set episode number")
+    edit_parser.add_argument("--year", type=int, help="Set year")
+    edit_parser.add_argument("--type", choices=["movie", "show", "commercial", "bumper"],
+                             help="Set content type")
+    edit_parser.add_argument("--tags", help="Replace all tags (comma-separated, e.g. \"drama,action\")")
+    edit_parser.set_defaults(func=cmd_content_edit)
+
+    # content reset
+    reset_parser = content_sub.add_parser("reset", help="Reset content for re-identification")
+    reset_parser.add_argument("ids", type=int, nargs="+", help="Content IDs to reset")
+    reset_parser.set_defaults(func=cmd_content_reset)
 
     # Schedule commands
     schedule_parser = subparsers.add_parser("schedule", help="Schedule commands")

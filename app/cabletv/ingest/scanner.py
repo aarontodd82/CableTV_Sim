@@ -149,24 +149,38 @@ def scan_directory(
     with db_connection() as conn:
         log_ingest(conn, "scan", "started", message=str(directory))
 
+        # Build set of known paths for fast lookup (avoids hashing existing files)
+        cursor = conn.cursor()
+        cursor.execute("SELECT original_path FROM content")
+        known_paths = {row[0] for row in cursor.fetchall()}
+
         for path in directory.rglob("*"):
             if not path.is_file() or not is_video_file(path):
                 continue
 
             stats["scanned"] += 1
 
+            # Quick check: skip if path is already in database
+            try:
+                relative_path = str(path.relative_to(root))
+            except ValueError:
+                relative_path = str(path)
+
+            if relative_path in known_paths:
+                stats["skipped"] += 1
+                continue
+
             if verbose:
                 print(f"Scanning: {path.name}")
 
             try:
-                # Compute hash first to check for duplicates
+                # Compute hash to check for duplicates (different path, same file)
                 file_hash = compute_file_hash(path)
 
-                # Check if already in database
                 existing = get_content_by_hash(conn, file_hash)
                 if existing:
                     if verbose:
-                        print(f"  Skipped (already in DB): {existing['title']}")
+                        print(f"  Skipped (duplicate of {existing['title']})")
                     stats["skipped"] += 1
                     continue
 

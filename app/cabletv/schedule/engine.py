@@ -334,41 +334,48 @@ class ScheduleEngine:
     def _find_block_start(
         self,
         channel_config: ChannelConfig,
-        target_slot: int
+        target_slot: int,
+        exclude_ids: Optional[set[int]] = None
     ) -> tuple[int, dict]:
         """
         Find the starting slot of the content block containing target_slot.
 
-        The key insight: we need to walk BACKWARDS and check if any earlier
-        content's duration extends into the target slot. Each slot gets its
-        own random selection, but content that starts at slot N and needs
-        M slots will occupy slots N through N+M-1.
+        Walks FORWARD from well before target_slot, assigning content to slots
+        and skipping slots that are occupied by multi-slot content. This
+        correctly handles movies/shows that span multiple 30-minute slots.
+
+        Args:
+            channel_config: Channel config
+            target_slot: The slot to find content for
+            exclude_ids: Content IDs to exclude (for collision avoidance)
 
         Returns:
             Tuple of (start_slot, content_dict)
         """
-        # Search backwards to find content that started earlier but extends into target_slot
-        # We need to check: "does content at slot X occupy target_slot?"
-        # Content at slot X occupies slots X through X + slots_needed - 1
+        # Walk forward from far enough back to catch any long content
+        search_start = max(0, target_slot - 100)
 
-        search_start = max(0, target_slot - 100)  # Look back up to 100 slots
-
-        for check_slot in range(target_slot, search_start - 1, -1):
-            content = self._select_content_for_slot(channel_config, check_slot)
+        current_slot = search_start
+        while current_slot <= target_slot:
+            content = self._select_content_for_slot(
+                channel_config, current_slot, exclude_ids=exclude_ids)
             if not content:
+                current_slot += 1
                 continue
 
-            # How many slots does this content need?
             num_slots = slots_needed(content["duration_seconds"], self.slot_duration)
+            end_slot = current_slot + num_slots  # exclusive
 
-            # Does this content extend to cover target_slot?
-            # Content at check_slot occupies: check_slot, check_slot+1, ..., check_slot+num_slots-1
-            if check_slot + num_slots > target_slot:
-                # Yes! This content started at check_slot and extends past target_slot
-                return check_slot, content
+            if end_slot > target_slot:
+                # This content spans to cover target_slot
+                return current_slot, content
 
-        # If nothing found, return whatever is selected at target_slot
-        content = self._select_content_for_slot(channel_config, target_slot)
+            # Content ends before target_slot, skip to next available slot
+            current_slot = end_slot
+
+        # Fallback (shouldn't reach here)
+        content = self._select_content_for_slot(
+            channel_config, target_slot, exclude_ids=exclude_ids)
         return target_slot, content if content else {}
 
     def _get_content_break_points(self, content_id: int) -> list[float]:
@@ -376,6 +383,27 @@ class ScheduleEngine:
         with db_connection() as conn:
             break_rows = get_break_points(conn, content_id)
             return [row["timestamp_seconds"] for row in break_rows]
+
+    def _get_exclusions(self, channel_number: int, target_slot: int) -> set[int]:
+        """
+        Get content IDs to exclude for collision avoidance.
+
+        Lower-numbered channels get priority. Each channel excludes
+        content playing on all channels below it, with those lower
+        channels also respecting their own exclusions (iterative).
+        """
+        selections: dict[int, int] = {}  # channel_number -> content_id
+
+        for ch in sorted(self.config.channels, key=lambda c: c.number):
+            if ch.number >= channel_number:
+                break
+            # This lower channel excludes content from channels below it
+            ch_exclude = set(selections.values()) or None
+            _, content = self._find_block_start(ch, target_slot, exclude_ids=ch_exclude)
+            if content and content.get("id"):
+                selections[ch.number] = content["id"]
+
+        return set(selections.values())
 
     def what_is_on(
         self,
@@ -412,8 +440,12 @@ class ScheduleEngine:
         # Find current slot
         current_slot = get_slot_number(when, self.epoch, self.slot_duration)
 
+        # Get exclusions from lower-priority channels to avoid collisions
+        exclude_ids = self._get_exclusions(channel_number, current_slot)
+
         # Find the block start and content
-        block_start_slot, content = self._find_block_start(channel_config, current_slot)
+        block_start_slot, content = self._find_block_start(
+            channel_config, current_slot, exclude_ids=exclude_ids or None)
 
         if not content:
             return None

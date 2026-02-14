@@ -30,11 +30,13 @@ class ChannelConfig:
 class IngestConfig:
     """Ingest pipeline configuration."""
     tmdb_api_key: str = ""
+    anthropic_api_key: str = ""
     transcode_width: int = 640
     transcode_height: int = 480
     video_bitrate: str = "1500k"
     audio_bitrate: str = "128k"
     keyframe_interval: int = 30  # GOP size for fast seeking
+    widescreen_crop: int = 0  # Percent to crop from each side of 16:9 content (0=full letterbox, 12=moderate, 25=full crop)
 
 
 @dataclass
@@ -119,11 +121,13 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         ing = data["ingest"]
         config.ingest = IngestConfig(
             tmdb_api_key=ing.get("tmdb_api_key", ""),
+            anthropic_api_key=ing.get("anthropic_api_key", ""),
             transcode_width=ing.get("transcode_width", 640),
             transcode_height=ing.get("transcode_height", 480),
             video_bitrate=ing.get("video_bitrate", "1500k"),
             audio_bitrate=ing.get("audio_bitrate", "128k"),
             keyframe_interval=ing.get("keyframe_interval", 30),
+            widescreen_crop=ing.get("widescreen_crop", 0),
         )
 
     # Parse playback settings
@@ -188,11 +192,13 @@ def save_config(config: Config, config_path: Optional[Path] = None) -> None:
         ],
         "ingest": {
             "tmdb_api_key": config.ingest.tmdb_api_key,
+            "anthropic_api_key": config.ingest.anthropic_api_key,
             "transcode_width": config.ingest.transcode_width,
             "transcode_height": config.ingest.transcode_height,
             "video_bitrate": config.ingest.video_bitrate,
             "audio_bitrate": config.ingest.audio_bitrate,
             "keyframe_interval": config.ingest.keyframe_interval,
+            "widescreen_crop": config.ingest.widescreen_crop,
         },
         "playback": {
             "mpv_ipc_port": config.playback.mpv_ipc_port,

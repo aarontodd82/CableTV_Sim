@@ -1,5 +1,6 @@
 """Stage 3: Transcode video to normalized 640x480 4:3 format."""
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -10,15 +11,58 @@ from ..db import (
     db_connection, get_content_by_status, update_content_status,
     update_content_normalized_path, log_ingest, get_content_by_id
 )
-from ..platform import get_drive_root, get_content_paths, get_ffmpeg_path
+from ..platform import get_drive_root, get_content_paths, get_ffmpeg_path, get_ffprobe_path
 from ..utils.ffmpeg import probe_file
+
+
+_nvenc_available = None
+
+def has_nvenc() -> bool:
+    """Check if NVIDIA NVENC hardware encoder is available."""
+    global _nvenc_available
+    if _nvenc_available is not None:
+        return _nvenc_available
+    try:
+        ffmpeg = get_ffmpeg_path()
+        result = subprocess.run(
+            [ffmpeg, "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=10
+        )
+        _nvenc_available = "h264_nvenc" in result.stdout
+    except Exception:
+        _nvenc_available = False
+    return _nvenc_available
+
+
+def _find_english_audio(input_path: Path) -> Optional[int]:
+    """Find the index of the English audio stream, or None to use default."""
+    ffprobe = get_ffprobe_path()
+    try:
+        result = subprocess.run(
+            [ffprobe, "-v", "quiet", "-print_format", "json",
+             "-show_streams", "-select_streams", "a", str(input_path)],
+            capture_output=True, text=True, timeout=30
+        )
+        import json
+        data = json.loads(result.stdout)
+        streams = data.get("streams", [])
+        if len(streams) <= 1:
+            return None  # Only one audio track, use default
+        for stream in streams:
+            lang = stream.get("tags", {}).get("language", "").lower()
+            if lang in ("eng", "en", "english"):
+                return int(stream["index"])
+    except Exception:
+        pass
+    return None
 
 
 def build_transcode_command(
     input_path: Path,
     output_path: Path,
     config: Config,
-    source_aspect: str = "16:9"
+    source_aspect: str = "16:9",
+    audio_stream_index: Optional[int] = None,
 ) -> list[str]:
     """
     Build ffmpeg command for transcoding.
@@ -44,36 +88,59 @@ def build_transcode_command(
         source_ratio = 16 / 9
 
     target_ratio = width / height  # 4:3 = 1.333
+    crop_pct = config.ingest.widescreen_crop
 
     # Build video filter
     if abs(source_ratio - target_ratio) < 0.1:
         # Source is already ~4:3, just scale
         vf = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
     elif source_ratio > target_ratio:
-        # Source is wider (16:9), letterbox top/bottom
-        vf = f"scale={width}:-2:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
+        # Source is wider (16:9) than target (4:3)
+        if crop_pct > 0:
+            # Crop sides first to reduce letterboxing, then scale to fit
+            crop_frac = crop_pct / 100.0
+            vf = f"crop=iw*{1 - 2*crop_frac:.4f}:ih,scale={width}:-2:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
+        else:
+            vf = f"scale={width}:-2:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
     else:
         # Source is taller, pillarbox left/right
         vf = f"scale=-2:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
+
+    use_nvenc = has_nvenc()
 
     cmd = [
         ffmpeg,
         "-y",  # Overwrite output
         "-i", str(input_path),
-        # Video settings
-        "-c:v", "libx264",
-        "-preset", "medium",
-        "-b:v", config.ingest.video_bitrate,
+        "-map", "0:v:0",
+        "-map", f"0:{audio_stream_index}" if audio_stream_index is not None else "0:a:0",
         "-vf", vf,
-        "-g", str(keyframe_interval),  # GOP size for fast seeking
-        "-keyint_min", str(keyframe_interval),
+    ]
+
+    if use_nvenc:
+        cmd += [
+            "-c:v", "h264_nvenc",
+            "-preset", "p4",
+            "-b:v", config.ingest.video_bitrate,
+            "-g", str(keyframe_interval),
+        ]
+    else:
+        cmd += [
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-b:v", config.ingest.video_bitrate,
+            "-g", str(keyframe_interval),
+            "-keyint_min", str(keyframe_interval),
+        ]
+
+    cmd += [
         # Audio settings
         "-c:a", "aac",
         "-b:a", config.ingest.audio_bitrate,
         "-ar", "44100",
         "-ac", "2",
         # Output format
-        "-movflags", "+faststart",  # Enable streaming
+        "-movflags", "+faststart",
         str(output_path)
     ]
 
@@ -125,7 +192,7 @@ def transcode_file(
             return False
 
         # Check status
-        if content["status"] not in ("identified", "transcoded") and not force:
+        if content["status"] not in ("identified", "transcoding", "transcoded") and not force:
             if verbose:
                 print(f"Content not ready for transcoding (status: {content['status']})")
             return False
@@ -150,9 +217,37 @@ def transcode_file(
             update_content_status(conn, content_id, "transcoded")
             return True
 
+        # Probe source to check resolution
+        probe = probe_file(input_path)
+        target_w = config.ingest.transcode_width
+        target_h = config.ingest.transcode_height
+
+        # Check if source is already at or below target resolution
+        # But still transcode if widescreen and crop is enabled
+        source_ratio = probe.width / probe.height if probe.height else 1
+        needs_crop = config.ingest.widescreen_crop > 0 and source_ratio > (target_w / target_h + 0.1)
+
+        if probe.width <= target_w and probe.height <= target_h and not needs_crop:
+            # Check bitrate — re-encode if over target, otherwise just copy
+            target_bps = int(config.ingest.video_bitrate.replace("k", "000"))
+            source_bps = probe.bitrate or 0
+            if source_bps > target_bps:
+                if verbose:
+                    print(f"Re-encoding (already {probe.width}x{probe.height} but {source_bps//1000}kbps > {target_bps//1000}kbps): {content['title']}")
+                # Fall through to normal transcode
+            else:
+                if verbose:
+                    print(f"Copying (already {probe.width}x{probe.height}, {source_bps//1000}kbps): {content['title']}")
+                shutil.copy2(str(input_path), str(output_path))
+                relative_output = output_path.relative_to(root)
+                update_content_normalized_path(conn, content_id, str(relative_output))
+                update_content_status(conn, content_id, "transcoded")
+                log_ingest(conn, "transcode", "completed", content_id, "Copied - below target resolution and bitrate")
+                return True
+
         if verbose:
             print(f"Transcoding: {content['title']}")
-            print(f"  Input: {input_path}")
+            print(f"  Input: {input_path} ({probe.width}x{probe.height})")
             print(f"  Output: {output_path}")
 
         # Update status
@@ -161,14 +256,14 @@ def transcode_file(
 
     # Build and run command (outside DB transaction for long operation)
     try:
-        # Get source aspect ratio
-        probe = probe_file(input_path)
         source_aspect = probe.aspect_ratio
+        eng_audio = _find_english_audio(input_path)
 
-        cmd = build_transcode_command(input_path, output_path, config, source_aspect)
+        cmd = build_transcode_command(input_path, output_path, config, source_aspect, eng_audio)
 
         if verbose:
-            print(f"  Aspect ratio: {source_aspect} -> 4:3")
+            audio_info = f", audio track {eng_audio}" if eng_audio is not None else ""
+            print(f"  Aspect ratio: {source_aspect} -> 4:3{audio_info}")
 
         # Run ffmpeg with progress output
         process = subprocess.Popen(
@@ -262,11 +357,25 @@ def transcode_all(
     with db_connection() as conn:
         log_ingest(conn, "transcode", "started", message="Batch transcode")
 
-        # Get content needing transcoding
-        content_list = get_content_by_status(conn, "identified")
+        if force:
+            # Force: redo everything that's past scanning, in ID order
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM content WHERE status NOT IN ('scanned', 'error') ORDER BY id"
+            )
+            content_list = cursor.fetchall()
+        else:
+            # Normal: only identified + interrupted, in ID order
+            content_list = get_content_by_status(conn, "identified")
+            interrupted = get_content_by_status(conn, "transcoding")
+            if interrupted:
+                content_list = interrupted + content_list
+                content_list.sort(key=lambda c: c["id"])
 
         if verbose:
+            encoder = "h264_nvenc (GPU)" if has_nvenc() else "libx264 (CPU)"
             print(f"Found {len(content_list)} items to transcode")
+            print(f"Encoder: {encoder}")
 
     for content in content_list:
         success = transcode_file(content["id"], config, verbose=verbose, force=force)
