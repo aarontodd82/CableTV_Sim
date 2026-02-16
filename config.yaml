@@ -36,14 +36,29 @@ channels:
     tags: ["comedy", "sitcom"]
     content_types: ["show"]
 
+  - number: 16
+    name: "A&E"
+    tags: ["mystery", "crime", "drama"]
+    content_types: ["show", "movie"]
+
   - number: 17
-    name: "Nickelodeon"
-    tags: ["kids", "family", "animation"]
+    name: "USA Network"
+    tags: ["action", "adventure", "crime"]
+    content_types: ["show", "movie"]
+
+  - number: 18
+    name: "Disney Channel"
+    tags: ["disney"]
     content_types: ["show", "movie"]
 
   - number: 20
     name: "Cartoon Network"
     tags: ["animation", "kids"]
+    content_types: ["show", "movie"]
+
+  - number: 22
+    name: "TBS"
+    tags: ["comedy", "family"]
     content_types: ["show", "movie"]
 
   - number: 24
@@ -57,79 +72,64 @@ channels:
     content_types: ["music"]
     commercial_ratio: 0.0
 
-  - number: 28
-    name: "USA Network"
-    tags: ["action", "adventure", "crime"]
-    content_types: ["show", "movie"]
-
-  - number: 30
-    name: "Disney Channel"
-    tags: ["disney"]
-    content_types: ["show", "movie"]
-
-  # --- Specialty Cable (32-48) ---
-  - number: 32
-    name: "TV Land"
-    tags: ["classic", "sitcom", "comedy"]
-    content_types: ["show"]
-
-  - number: 34
-    name: "Hallmark"
-    tags: ["romance"]
-    content_types: ["show", "movie"]
-
-  - number: 36
-    name: "A&E"
-    tags: ["mystery", "crime", "drama"]
-    content_types: ["show", "movie"]
-
-  - number: 38
+  - number: 27
     name: "Discovery Channel"
     tags: ["documentary", "educational", "history"]
     content_types: ["show", "movie"]
 
-  - number: 42
-    name: "The Arena"
-    tags: ["gameshow", "sports"]
-    content_types: ["show"]
+  - number: 28
+    name: "Nickelodeon"
+    tags: ["kids", "family", "animation"]
+    content_types: ["show", "movie"]
 
-  - number: 44
+  # --- Specialty Cable (32-44) ---
+  - number: 32
     name: "AMC"
     tags: ["classic", "action", "drama"]
     content_types: ["movie"]
 
-  - number: 46
+  - number: 34
+    name: "TV Land"
+    tags: ["classic", "sitcom", "comedy"]
+    content_types: ["show"]
+
+  - number: 36
+    name: "Hallmark"
+    tags: ["romance"]
+    content_types: ["show", "movie"]
+
+  - number: 38
+    name: "The Arena"
+    tags: ["gameshow", "sports"]
+    content_types: ["show"]
+
+  - number: 40
     name: "Fright TV"
     tags: ["horror", "thriller"]
     content_types: ["show", "movie"]
 
-  - number: 48
+  - number: 42
     name: "Western Frontier"
     tags: ["western"]
     content_types: ["show", "movie"]
 
-  # --- Premium / Movie (50-62) ---
-  - number: 50
+  - number: 44
     name: "TNT"
     tags: ["drama", "action"]
     content_types: ["show", "movie"]
 
-  - number: 52
-    name: "TBS"
-    tags: ["comedy", "family"]
-    content_types: ["show", "movie"]
-
-  - number: 55
+  # --- Premium / Movie (50-55) ---
+  - number: 50
     name: "HBO"
     tags: ["action", "comedy", "drama", "thriller"]
     content_types: ["movie"]
 
-  - number: 58
+  - number: 52
     name: "Cinemax"
     tags: ["action", "scifi", "horror", "thriller"]
     content_types: ["movie"]
 
-  - number: 62
+  - number: 55
     name: "TCM"
     tags: ["classic"]
     content_types: ["movie"]

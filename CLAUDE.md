@@ -259,32 +259,32 @@ After content finishes the pipeline (all stages complete), always run these chec
 Content ONLY appears on a channel if it has at least one tag matching that channel's tags AND a matching content_type. After identification, check that no content is "orphaned" (has tags that don't match any channel).
 
 Current channel tag coverage:
-- action: Ch5, 9, 28, 44, 50, 55, 58
-- adventure: Ch5, 28
-- animation: Ch17, 20
-- disney: Ch30
-- comedy: Ch3, 9, 15, 32, 52, 55
-- crime: Ch28, 36
-- classic: Ch32, 44, 62
-- documentary: Ch7, 38
-- drama: Ch3, 9, 36, 44, 50, 55
-- educational: Ch7, 38
-- family: Ch3, 9, 17, 52
+- action: Ch5, 9, 17, 32, 44, 50, 52
+- adventure: Ch5, 17
+- animation: Ch20, 28
+- disney: Ch18
+- comedy: Ch3, 9, 15, 22, 34, 50
+- crime: Ch16, 17
+- classic: Ch32, 34, 55
+- documentary: Ch7, 27
+- drama: Ch3, 9, 16, 32, 44, 50
+- educational: Ch7, 27
+- family: Ch3, 9, 22, 28
 - fantasy: Ch24
-- gameshow: Ch42
-- history: Ch38
-- horror: Ch46, 58
-- kids: Ch17, 20
+- gameshow: Ch38
+- history: Ch27
+- horror: Ch40, 52
+- kids: Ch20, 28
 - music: Ch25
-- mystery: Ch36
-- romance: Ch34
-- scifi: Ch9, 24, 58
-- sitcom: Ch15, 32
-- sports: Ch42
-- thriller: Ch46, 55, 58
-- western: Ch48
+- mystery: Ch16
+- romance: Ch36
+- scifi: Ch9, 24, 52
+- sitcom: Ch15, 34
+- sports: Ch38
+- thriller: Ch40, 50, 52
+- western: Ch42
 
-Movies-only channels: Ch9 (TV 9 Movies), Ch44 (AMC), Ch55 (HBO), Ch58 (Cinemax), Ch62 (TCM). Don't let shows end up with tags that only match these channels unless they're actually movies.
+Movies-only channels: Ch9 (TV 9 Movies), Ch32 (AMC), Ch50 (HBO), Ch52 (Cinemax), Ch55 (TCM). Don't let shows end up with tags that only match these channels unless they're actually movies.
 
 ### Channel Configuration
 

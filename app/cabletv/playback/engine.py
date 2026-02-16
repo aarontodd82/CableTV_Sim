@@ -204,13 +204,22 @@ class PlaybackEngine:
         now_playing = self._current_playing
         lines = [f"Ch {channel_number} - {name}", ""]
 
-        if now_playing:
-            lines.append(f"Now:  {now_playing.entry.title}")
-
-        upcoming = self.schedule.get_upcoming(channel_number, count=2)
-        for start_time, title in upcoming:
-            time_str = start_time.strftime("%I:%M %p").lstrip("0")
-            lines.append(f"{time_str}  {title}")
+        if now_playing and now_playing.is_end_bumper:
+            # End-of-slot bumper: current show is done, show upcoming as "Now"
+            upcoming = self.schedule.get_upcoming(channel_number, count=3)
+            if upcoming:
+                lines.append(f"Now:  {upcoming[0][1]}")
+                for start_time, title in upcoming[1:]:
+                    time_str = start_time.strftime("%I:%M %p").lstrip("0")
+                    lines.append(f"{time_str}  {title}")
+        else:
+            # Mid-content bumper: show resumes after this break
+            if now_playing:
+                lines.append(f"Now:  {now_playing.entry.title}")
+            upcoming = self.schedule.get_upcoming(channel_number, count=2)
+            for start_time, title in upcoming:
+                time_str = start_time.strftime("%I:%M %p").lstrip("0")
+                lines.append(f"{time_str}  {title}")
 
         self.mpv.show_osd_message("\n".join(lines), int(seconds_remaining * 1000))
 
