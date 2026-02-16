@@ -24,6 +24,7 @@ class CableTVSystem:
         self.config = config or load_config()
         self.schedule: Optional[ScheduleEngine] = None
         self.playback: Optional[PlaybackEngine] = None
+        self.guide_generator = None
         self._web_thread: Optional[threading.Thread] = None
         self._shutdown_event = threading.Event()
 
@@ -51,6 +52,13 @@ class CableTVSystem:
         # Create playback engine
         self.playback = PlaybackEngine(self.config, self.schedule)
         print("  Playback engine ready")
+
+        # Create guide generator if enabled
+        if self.config.guide.enabled:
+            from .guide.generator import GuideGenerator
+            self.guide_generator = GuideGenerator(self.config, self.schedule)
+            self.playback.set_guide_generator(self.guide_generator)
+            print("  Guide generator ready")
 
         return True
 
@@ -121,6 +129,9 @@ class CableTVSystem:
 
         self._shutdown_event.set()
 
+        if self.guide_generator:
+            self.guide_generator.stop()
+
         if self.playback:
             self.playback.shutdown()
             print("  Playback engine stopped")
@@ -157,6 +168,10 @@ class CableTVSystem:
             # Start web server
             if not no_web:
                 self.start_web_server()
+
+            # Start guide generator
+            if self.guide_generator:
+                self.guide_generator.start()
 
             # Wait for shutdown
             self.wait_for_shutdown()

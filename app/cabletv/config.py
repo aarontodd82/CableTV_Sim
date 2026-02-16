@@ -57,6 +57,24 @@ class WebConfig:
 
 
 @dataclass
+class GuideConfig:
+    """TV Guide channel configuration."""
+    enabled: bool = True
+    channel_number: int = 14
+    promo_duration: int = 20  # Seconds per promo clip
+    scroll_speed: float = 3.0  # Seconds per row
+    segment_duration: int = 600  # Seconds per generated segment
+    regenerate_interval: int = 600  # Seconds between regenerations
+    promo_seek_offset: int = 300  # Seconds into content to extract promo clip
+    fps: int = 15  # Frames per second for guide video
+    width: int = 640
+    height: int = 480
+    grid_height: int = 240  # Bottom portion for scrolling grid
+    promo_height: int = 240  # Top portion for promo video
+    background_music: str = ""  # Path to background music file (MP3/WAV)
+
+
+@dataclass
 class Config:
     """Main configuration container."""
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
@@ -64,6 +82,7 @@ class Config:
     ingest: IngestConfig = field(default_factory=IngestConfig)
     playback: PlaybackConfig = field(default_factory=PlaybackConfig)
     web: WebConfig = field(default_factory=WebConfig)
+    guide: GuideConfig = field(default_factory=GuideConfig)
 
     @property
     def channel_map(self) -> dict[int, ChannelConfig]:
@@ -150,6 +169,25 @@ def load_config(config_path: Optional[Path] = None) -> Config:
             debug=web.get("debug", False),
         )
 
+    # Parse guide settings
+    if "guide" in data:
+        g = data["guide"]
+        config.guide = GuideConfig(
+            enabled=g.get("enabled", True),
+            channel_number=g.get("channel_number", 2),
+            promo_duration=g.get("promo_duration", 20),
+            scroll_speed=g.get("scroll_speed", 3.0),
+            segment_duration=g.get("segment_duration", 600),
+            regenerate_interval=g.get("regenerate_interval", 600),
+            promo_seek_offset=g.get("promo_seek_offset", 300),
+            fps=g.get("fps", 15),
+            width=g.get("width", 640),
+            height=g.get("height", 480),
+            grid_height=g.get("grid_height", 240),
+            promo_height=g.get("promo_height", 240),
+            background_music=g.get("background_music", ""),
+        )
+
     return config
 
 
@@ -212,6 +250,21 @@ def save_config(config: Config, config_path: Optional[Path] = None) -> None:
             "host": config.web.host,
             "port": config.web.port,
             "debug": config.web.debug,
+        },
+        "guide": {
+            "enabled": config.guide.enabled,
+            "channel_number": config.guide.channel_number,
+            "promo_duration": config.guide.promo_duration,
+            "scroll_speed": config.guide.scroll_speed,
+            "segment_duration": config.guide.segment_duration,
+            "regenerate_interval": config.guide.regenerate_interval,
+            "promo_seek_offset": config.guide.promo_seek_offset,
+            "fps": config.guide.fps,
+            "width": config.guide.width,
+            "height": config.guide.height,
+            "grid_height": config.guide.grid_height,
+            "promo_height": config.guide.promo_height,
+            "background_music": config.guide.background_music,
         },
     }
 

@@ -3,12 +3,16 @@
 import threading
 import time
 from datetime import datetime, timedelta
-from typing import Optional, Callable
+from pathlib import Path
+from typing import Optional, Callable, TYPE_CHECKING
 
 from ..config import Config
 from ..platform import get_drive_root
 from ..schedule.engine import ScheduleEngine, NowPlaying
 from .mpv_control import MpvController
+
+if TYPE_CHECKING:
+    from ..guide.generator import GuideGenerator
 
 
 class PlaybackEngine:
@@ -29,6 +33,11 @@ class PlaybackEngine:
         self._lock = threading.Lock()
         self._on_channel_change: Optional[Callable[[int], None]] = None
         self._on_content_change: Optional[Callable[[NowPlaying], None]] = None
+        self._guide_generator: Optional["GuideGenerator"] = None
+
+    def set_guide_generator(self, generator: "GuideGenerator") -> None:
+        """Set the guide generator for TV Guide channel playback."""
+        self._guide_generator = generator
 
     @property
     def current_channel(self) -> Optional[int]:
@@ -81,6 +90,13 @@ class PlaybackEngine:
         if channel_number not in self.config.channel_map:
             print(f"Channel {channel_number} not found")
             return False
+
+        # Check if this is the guide channel
+        if channel_number == self.config.guide.channel_number and self.config.guide.enabled:
+            return self._tune_to_guide(channel_number)
+
+        # Clear guide loop mode when tuning to a regular channel
+        self.mpv._set_property("loop-file", "no")
 
         # Phase 1: Compute what to play and update state (lock held, no IPC)
         play_action = None
@@ -233,6 +249,102 @@ class PlaybackEngine:
         if entry.year:
             lines.append(str(entry.year))
         self.mpv.show_osd_message("\n".join(lines), 5000)
+
+    def _tune_to_guide(self, channel_number: int) -> bool:
+        """
+        Tune to the TV Guide channel.
+
+        Plays the pre-rendered guide segment, seeking to the correct
+        position so it feels like a live always-running channel.
+        """
+        with self._lock:
+            # Cancel any pending timers
+            if self._timer:
+                self._timer.cancel()
+                self._timer = None
+            if self._music_end_timer:
+                self._music_end_timer.cancel()
+                self._music_end_timer = None
+
+            self._current_channel = channel_number
+            self._current_playing = None
+
+        # Check if guide generator is available and ready
+        if not self._guide_generator or not self._guide_generator.is_ready:
+            channel_config = self.config.channel_map.get(channel_number)
+            name = channel_config.name if channel_config else "TV Guide"
+            self.mpv.stop()
+            self.mpv.show_osd_message(f"{channel_number}\n{name}\nLoading...", 5000)
+
+            # Schedule a retry in 3 seconds
+            with self._lock:
+                self._timer = threading.Timer(3.0, self._retry_guide_tune)
+                self._timer.daemon = True
+                self._timer.start()
+            return True
+
+        segment_info = self._guide_generator.get_current_segment()
+        if not segment_info:
+            self.mpv.show_osd_message(f"{channel_number}\nTV Guide\nLoading...", 5000)
+            return False
+
+        file_path, generation_time, segment_duration = segment_info
+
+        # Calculate seek position: where we should be in the segment right now
+        now = datetime.now()
+        elapsed = (now - generation_time).total_seconds()
+        seek = elapsed % segment_duration if segment_duration > 0 else 0
+
+        # Play the segment file, looping so it never stops if the
+        # re-tune timer is slightly late or the file is shorter than expected
+        self.mpv._set_property("loop-file", "inf")
+        success = self.mpv.play_file(str(file_path), seek_seconds=seek)
+        if not success:
+            print(f"Failed to play guide segment: {file_path}")
+            self.mpv._set_property("loop-file", "no")
+            return False
+
+        self._show_channel_osd(channel_number)
+
+        # Schedule re-tune when segment ends (to pick up new segment)
+        remaining = segment_duration - seek
+        if remaining > 0:
+            with self._lock:
+                self._timer = threading.Timer(remaining + 0.5, self._on_guide_segment_end)
+                self._timer.daemon = True
+                self._timer.start()
+
+        # Fire channel change callback
+        if self._on_channel_change:
+            self._on_channel_change(channel_number)
+
+        return True
+
+    def _retry_guide_tune(self) -> None:
+        """Retry tuning to guide channel if it wasn't ready."""
+        with self._lock:
+            channel = self._current_channel
+            self._timer = None
+
+        guide_ch = self.config.guide.channel_number
+        if channel == guide_ch:
+            try:
+                self._tune_to_guide(guide_ch)
+            except Exception as e:
+                print(f"Guide retry error: {e}")
+
+    def _on_guide_segment_end(self) -> None:
+        """Re-tune to guide channel when segment ends to pick up new segment."""
+        with self._lock:
+            channel = self._current_channel
+            self._timer = None
+
+        guide_ch = self.config.guide.channel_number
+        if channel == guide_ch:
+            try:
+                self._tune_to_guide(guide_ch)
+            except Exception as e:
+                print(f"Guide segment transition error: {e}")
 
     def _schedule_next_content(self) -> None:
         """

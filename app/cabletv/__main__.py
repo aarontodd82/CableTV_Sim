@@ -420,6 +420,37 @@ def cmd_schedule_collisions(args):
         print("\nNo collisions found")
 
 
+def cmd_guide_generate(args):
+    """Generate a guide segment for testing."""
+    from .config import load_config
+    from .db import init_database
+    from .platform import ensure_directories
+    from .schedule.engine import ScheduleEngine
+    from .guide.generator import GuideGenerator
+
+    init_database()
+    ensure_directories()
+    config = load_config()
+    schedule = ScheduleEngine(config)
+    generator = GuideGenerator(config, schedule)
+
+    short = args.short
+    seg_type = "short (2 min)" if short else f"full ({config.guide.segment_duration}s)"
+    print(f"\nGenerating {seg_type} guide segment...")
+    print("This may take a few minutes.\n")
+
+    success = generator.generate_once(short=short)
+
+    if success:
+        segment = generator.get_current_segment()
+        if segment:
+            print(f"\nSegment written to: {segment[0]}")
+            print(f"Duration: {segment[2]}s")
+            print(f"Play with: mpv \"{segment[0]}\"")
+    else:
+        print("\nGuide segment generation failed. Check ffmpeg is installed and content is available.")
+
+
 def cmd_stats(args):
     """Show database statistics."""
     from .db import init_database, db_connection, get_stats
@@ -593,6 +624,16 @@ def main():
     collision_parser = schedule_sub.add_parser("check-collisions", help="Check for collisions")
     collision_parser.set_defaults(func=cmd_schedule_collisions)
 
+    # Guide commands
+    guide_parser = subparsers.add_parser("guide", help="TV Guide channel commands")
+    guide_sub = guide_parser.add_subparsers(dest="guide_command")
+
+    # guide generate
+    guide_gen_parser = guide_sub.add_parser("generate", help="Generate a guide segment")
+    guide_gen_parser.add_argument("--short", action="store_true",
+                                  help="Generate short 2-minute segment")
+    guide_gen_parser.set_defaults(func=cmd_guide_generate)
+
     # Stats command
     stats_parser = subparsers.add_parser("stats", help="Show statistics")
     stats_parser.set_defaults(func=cmd_stats)
@@ -613,6 +654,9 @@ def main():
         return 1
     if args.command == "schedule" and not args.schedule_command:
         schedule_parser.print_help()
+        return 1
+    if args.command == "guide" and not args.guide_command:
+        guide_parser.print_help()
         return 1
 
     if hasattr(args, "func"):

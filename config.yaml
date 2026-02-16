@@ -30,6 +30,13 @@ channels:
     tags: ["action", "comedy", "drama", "family", "scifi"]
     content_types: ["movie"]
 
+  # --- Guide Channel ---
+  - number: 14
+    name: "Preview Channel"
+    tags: []
+    content_types: []
+    commercial_ratio: 0.0
+
   # --- Basic Cable (15-28) ---
   - number: 15
     name: "Comedy Central"
@@ -170,3 +177,22 @@ web:
   port: 5000
   # Enable debug mode (disable in production)
   debug: false
+
+guide:
+  # TV Guide channel (Prevue-style scrolling grid + promo clips)
+  enabled: true
+  channel_number: 14
+  # Duration of each promo clip in seconds
+  promo_duration: 20
+  # Seconds per row scroll speed
+  scroll_speed: 3.0
+  # Duration of each generated segment in seconds
+  segment_duration: 600
+  # How often to regenerate segments (seconds)
+  regenerate_interval: 600
+  # Seconds into content to extract promo clip from
+  promo_seek_offset: 300
+  # Frames per second for guide video
+  fps: 15
+  # Path to background music file (MP3/WAV), empty for no music
+  background_music: ""
