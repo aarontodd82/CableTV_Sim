@@ -36,10 +36,13 @@ def cmd_ingest_identify(args):
     if args.skip:
         skip_identification(verbose=True)
     elif not args.no_ai:
-        from .ingest.ai_identifier import ai_identify_content
+        from .ingest.ai_identifier import ai_identify_content, check_tag_consistency
         ai_identify_content(config, verbose=True)
+        check_tag_consistency(verbose=True)
     else:
         identify_content(config, auto=args.auto, verbose=True)
+        from .ingest.ai_identifier import check_tag_consistency
+        check_tag_consistency(verbose=True)
 
 
 def cmd_ingest_transcode(args):
@@ -179,6 +182,8 @@ def cmd_content_show(args):
     print(f"Status: {content['status']}")
     print(f"Duration: {duration_to_hms(content['duration_seconds'])}")
 
+    if content['artist']:
+        print(f"Artist: {content['artist']}")
     if content['series_name']:
         print(f"Series: {content['series_name']}")
     if content['season']:
@@ -230,52 +235,56 @@ def cmd_content_edit(args):
     init_database()
 
     with db_connection() as conn:
-        content = get_content_by_id(conn, args.id)
-        if not content:
-            print(f"Content ID {args.id} not found")
-            return
+        for content_id in args.ids:
+            content = get_content_by_id(conn, content_id)
+            if not content:
+                print(f"Content ID {content_id} not found")
+                continue
 
-        # Update metadata fields
-        update_content_metadata(
-            conn, args.id,
-            title=args.title,
-            series_name=args.series,
-            season=args.season,
-            episode=args.episode,
-            year=args.year,
-        )
-
-        # Update content_type if provided
-        if args.type:
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE content SET content_type = ?, updated_at = datetime('now') WHERE id = ?",
-                (args.type, args.id)
+            # Update metadata fields
+            update_content_metadata(
+                conn, content_id,
+                title=args.title,
+                series_name=args.series,
+                season=args.season,
+                episode=args.episode,
+                year=args.year,
+                artist=args.artist,
             )
 
-        # Replace tags if --tags provided
-        if args.tags is not None:
-            clear_content_tags(conn, args.id)
-            if args.tags:  # not empty string
-                for tag in args.tags.split(","):
-                    tag = tag.strip().lower()
-                    if tag:
-                        add_tag_to_content(conn, args.id, tag)
+            # Update content_type if provided
+            if args.type:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE content SET content_type = ?, updated_at = datetime('now') WHERE id = ?",
+                    (args.type, content_id)
+                )
 
-        # Show updated content
-        content = get_content_by_id(conn, args.id)
-        tags = get_content_tags(conn, args.id)
-        print(f"Updated content {args.id}:")
-        print(f"  Title: {content['title']}")
-        print(f"  Type: {content['content_type']}")
-        if content['series_name']:
-            print(f"  Series: {content['series_name']}")
-        if content['season']:
-            print(f"  Season: {content['season']}, Episode: {content['episode']}")
-        if content['year']:
-            print(f"  Year: {content['year']}")
-        if tags:
-            print(f"  Tags: {', '.join(tags)}")
+            # Replace tags if --tags provided
+            if args.tags is not None:
+                clear_content_tags(conn, content_id)
+                if args.tags:  # not empty string
+                    for tag in args.tags.split(","):
+                        tag = tag.strip().lower()
+                        if tag:
+                            add_tag_to_content(conn, content_id, tag)
+
+            # Show updated content
+            content = get_content_by_id(conn, content_id)
+            tags = get_content_tags(conn, content_id)
+            print(f"Updated content {content_id}:")
+            print(f"  Title: {content['title']}")
+            print(f"  Type: {content['content_type']}")
+            if content['artist']:
+                print(f"  Artist: {content['artist']}")
+            if content['series_name']:
+                print(f"  Series: {content['series_name']}")
+            if content['season']:
+                print(f"  Season: {content['season']}, Episode: {content['episode']}")
+            if content['year']:
+                print(f"  Year: {content['year']}")
+            if tags:
+                print(f"  Tags: {', '.join(tags)}")
 
 
 def cmd_content_reset(args):
@@ -298,6 +307,51 @@ def cmd_content_reset(args):
     print(f"\nRun 'cabletv ingest identify' to re-identify these items")
 
 
+def cmd_content_delete(args):
+    """Delete content, associated data, and files from disk."""
+    from .db import init_database, db_connection, get_content_by_id, delete_content
+    from .platform import get_drive_root
+
+    init_database()
+    root = get_drive_root()
+    deleted = []
+    files_removed = []
+
+    with db_connection() as conn:
+        for content_id in args.ids:
+            content = get_content_by_id(conn, content_id)
+            if not content:
+                print(f"Content ID {content_id} not found, skipping")
+                continue
+
+            title = content["title"]
+            content_type = content["content_type"]
+
+            # Delete files from disk
+            for path_field in ("original_path", "normalized_path"):
+                rel_path = content[path_field]
+                if rel_path:
+                    full_path = root / rel_path
+                    if full_path.exists():
+                        try:
+                            full_path.unlink()
+                            files_removed.append(str(full_path))
+                        except OSError as e:
+                            print(f"  Warning: could not delete {full_path}: {e}")
+
+            # Delete from database (cascade handles tags, break points, log)
+            delete_content(conn, content_id)
+            deleted.append((content_id, title, content_type))
+            print(f"Deleted ID {content_id}: [{content_type}] {title}")
+
+    if deleted:
+        print(f"\n{len(deleted)} item(s) deleted from database")
+        if files_removed:
+            print(f"{len(files_removed)} file(s) removed from disk")
+    else:
+        print("\nNo items deleted")
+
+
 def cmd_schedule_now(args):
     """Show what's on now."""
     from .config import load_config
@@ -318,7 +372,10 @@ def cmd_schedule_now(args):
             elapsed = duration_to_hms(now_playing.elapsed_seconds)
             remaining = duration_to_hms(now_playing.remaining_seconds)
             print(f"\nChannel {channel.number}: {channel.name}")
-            print(f"  {now_playing.entry.title}")
+            title = now_playing.entry.title
+            if now_playing.entry.artist:
+                title = f"{now_playing.entry.artist} - {title}"
+            print(f"  {title}")
             print(f"  Elapsed: {elapsed}, Remaining: {remaining}")
         else:
             print(f"\nChannel {channel.number}: {channel.name}")
@@ -469,7 +526,7 @@ def main():
 
     # content list
     list_parser = content_sub.add_parser("list", help="List content")
-    list_parser.add_argument("--type", "-t", choices=["movie", "show", "commercial", "bumper"],
+    list_parser.add_argument("--type", "-t", choices=["movie", "show", "commercial", "bumper", "music"],
                              help="Filter by content type")
     list_parser.add_argument("--status", "-s", help="Filter by status")
     list_parser.set_defaults(func=cmd_content_list)
@@ -496,14 +553,15 @@ def main():
 
     # content edit
     edit_parser = content_sub.add_parser("edit", help="Edit content metadata")
-    edit_parser.add_argument("id", type=int, help="Content ID")
+    edit_parser.add_argument("ids", type=int, nargs="+", help="Content ID(s)")
     edit_parser.add_argument("--title", help="Set title")
     edit_parser.add_argument("--series", help="Set series name")
     edit_parser.add_argument("--season", type=int, help="Set season number")
     edit_parser.add_argument("--episode", type=int, help="Set episode number")
     edit_parser.add_argument("--year", type=int, help="Set year")
-    edit_parser.add_argument("--type", choices=["movie", "show", "commercial", "bumper"],
+    edit_parser.add_argument("--type", choices=["movie", "show", "commercial", "bumper", "music"],
                              help="Set content type")
+    edit_parser.add_argument("--artist", help="Set artist name (for music content)")
     edit_parser.add_argument("--tags", help="Replace all tags (comma-separated, e.g. \"drama,action\")")
     edit_parser.set_defaults(func=cmd_content_edit)
 
@@ -511,6 +569,11 @@ def main():
     reset_parser = content_sub.add_parser("reset", help="Reset content for re-identification")
     reset_parser.add_argument("ids", type=int, nargs="+", help="Content IDs to reset")
     reset_parser.set_defaults(func=cmd_content_reset)
+
+    # content delete
+    delete_parser = content_sub.add_parser("delete", help="Delete content, files, and all associated data")
+    delete_parser.add_argument("ids", type=int, nargs="+", help="Content IDs to delete")
+    delete_parser.set_defaults(func=cmd_content_delete)
 
     # Schedule commands
     schedule_parser = subparsers.add_parser("schedule", help="Schedule commands")

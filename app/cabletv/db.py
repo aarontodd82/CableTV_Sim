@@ -54,6 +54,171 @@ def db_connection(db_path: Optional[Path] = None) -> Generator[sqlite3.Connectio
         conn.close()
 
 
+def _run_migrations(db_path: Path) -> None:
+    """Run schema migrations with foreign keys disabled.
+
+    Must use a separate connection with FK OFF so that ALTER TABLE RENAME
+    doesn't corrupt FK references in dependent tables.
+    Always creates a backup before making any changes.
+    """
+    import shutil
+
+    conn = sqlite3.connect(str(db_path), timeout=30.0)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA foreign_keys=OFF")
+
+        # Check if content table exists at all
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='content'")
+        if not cursor.fetchone():
+            return  # Fresh DB, init_database will create it
+
+        # Check what needs migrating
+        cursor.execute("PRAGMA table_info(content)")
+        columns = {row[1] for row in cursor.fetchall()}
+
+        cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='content'")
+        row = cursor.fetchone()
+        create_sql = row[0] if row else ""
+
+        needs_artist = "artist" not in columns
+        needs_music = "'music'" not in create_sql
+
+        # Check for broken FK references from previous bad migration
+        has_broken_fks = False
+        for table_name in ('content_tags', 'break_points', 'ingest_log'):
+            cursor.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (table_name,)
+            )
+            r = cursor.fetchone()
+            if r and r[0] and 'content_old' in r[0]:
+                has_broken_fks = True
+                break
+
+        if not needs_artist and not needs_music and not has_broken_fks:
+            return
+
+        # Back up database before any destructive changes
+        backup_path = db_path.with_suffix(".db.bak")
+        conn.close()
+        shutil.copy2(str(db_path), str(backup_path))
+        print(f"Database backup created: {backup_path}")
+        conn = sqlite3.connect(str(db_path), timeout=30.0)
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA foreign_keys=OFF")
+
+        print("Running database migration...")
+        cursor.execute("BEGIN")
+
+        # Add artist column if missing
+        if needs_artist:
+            cursor.execute("ALTER TABLE content ADD COLUMN artist TEXT")
+
+        # Recreate content table with updated CHECK constraint
+        if needs_music:
+            cursor.execute("ALTER TABLE content RENAME TO _content_migrate")
+            cursor.execute("""
+                CREATE TABLE content (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    content_type TEXT NOT NULL CHECK(content_type IN ('movie', 'show', 'commercial', 'bumper', 'music')),
+                    series_name TEXT,
+                    season INTEGER,
+                    episode INTEGER,
+                    year INTEGER,
+                    duration_seconds REAL NOT NULL,
+                    original_path TEXT NOT NULL,
+                    normalized_path TEXT,
+                    file_hash TEXT UNIQUE NOT NULL,
+                    tmdb_id INTEGER,
+                    artist TEXT,
+                    status TEXT NOT NULL DEFAULT 'scanned'
+                        CHECK(status IN ('scanned', 'identified', 'transcoding', 'transcoded', 'analyzing', 'ready', 'error')),
+                    error_message TEXT,
+                    width INTEGER,
+                    height INTEGER,
+                    aspect_ratio TEXT,
+                    codec TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+            cursor.execute("""
+                INSERT INTO content (id, title, content_type, series_name, season, episode,
+                    year, duration_seconds, original_path, normalized_path, file_hash,
+                    tmdb_id, artist, status, error_message, width, height, aspect_ratio,
+                    codec, created_at, updated_at)
+                SELECT id, title, content_type, series_name, season, episode,
+                    year, duration_seconds, original_path, normalized_path, file_hash,
+                    tmdb_id, artist, status, error_message, width, height, aspect_ratio,
+                    codec, created_at, updated_at
+                FROM _content_migrate
+            """)
+            cursor.execute("DROP TABLE _content_migrate")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_content_status ON content(status)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_content_type ON content(content_type)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_content_hash ON content(file_hash)")
+
+        # Repair broken FK references in dependent tables
+        if has_broken_fks:
+            for table_name, create_ddl in [
+                ('content_tags', """
+                    CREATE TABLE content_tags (
+                        content_id INTEGER NOT NULL,
+                        tag_id INTEGER NOT NULL,
+                        PRIMARY KEY (content_id, tag_id),
+                        FOREIGN KEY (content_id) REFERENCES content(id) ON DELETE CASCADE,
+                        FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+                    )
+                """),
+                ('break_points', """
+                    CREATE TABLE break_points (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        content_id INTEGER NOT NULL,
+                        timestamp_seconds REAL NOT NULL,
+                        confidence REAL DEFAULT 1.0,
+                        FOREIGN KEY (content_id) REFERENCES content(id) ON DELETE CASCADE
+                    )
+                """),
+                ('ingest_log', """
+                    CREATE TABLE ingest_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        content_id INTEGER,
+                        stage TEXT NOT NULL,
+                        status TEXT NOT NULL CHECK(status IN ('started', 'completed', 'failed')),
+                        message TEXT,
+                        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        FOREIGN KEY (content_id) REFERENCES content(id) ON DELETE SET NULL
+                    )
+                """),
+            ]:
+                cursor.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                    (table_name,)
+                )
+                r = cursor.fetchone()
+                if r and r[0] and 'content_old' in r[0]:
+                    cursor.execute(f"ALTER TABLE {table_name} RENAME TO _{table_name}_fix")
+                    cursor.execute(create_ddl)
+                    cursor.execute(f"INSERT INTO {table_name} SELECT * FROM _{table_name}_fix")
+                    cursor.execute(f"DROP TABLE _{table_name}_fix")
+
+            # Recreate indexes on repaired tables
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_content_tags_content ON content_tags(content_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_content_tags_tag ON content_tags(tag_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_break_points_content ON break_points(content_id)")
+
+        # Clean up any leftover content_old from previous broken migration
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='content_old'")
+        if cursor.fetchone():
+            cursor.execute("DROP TABLE content_old")
+
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def init_database(db_path: Optional[Path] = None) -> None:
     """
     Initialize the database with full schema.
@@ -68,6 +233,9 @@ def init_database(db_path: Optional[Path] = None) -> None:
     if db_path is None:
         db_path = get_db_path()
 
+    # Run migrations first (separate connection, FK OFF)
+    _run_migrations(db_path)
+
     with db_connection(db_path) as conn:
         cursor = conn.cursor()
 
@@ -76,7 +244,7 @@ def init_database(db_path: Optional[Path] = None) -> None:
             CREATE TABLE IF NOT EXISTS content (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT NOT NULL,
-                content_type TEXT NOT NULL CHECK(content_type IN ('movie', 'show', 'commercial', 'bumper')),
+                content_type TEXT NOT NULL CHECK(content_type IN ('movie', 'show', 'commercial', 'bumper', 'music')),
                 series_name TEXT,
                 season INTEGER,
                 episode INTEGER,
@@ -86,6 +254,7 @@ def init_database(db_path: Optional[Path] = None) -> None:
                 normalized_path TEXT,
                 file_hash TEXT UNIQUE NOT NULL,
                 tmdb_id INTEGER,
+                artist TEXT,
                 status TEXT NOT NULL DEFAULT 'scanned'
                     CHECK(status IN ('scanned', 'identified', 'transcoding', 'transcoded', 'analyzing', 'ready', 'error')),
                 error_message TEXT,
@@ -186,6 +355,7 @@ def init_database(db_path: Optional[Path] = None) -> None:
         )
 
 
+
 # Content CRUD operations
 
 def add_content(
@@ -203,6 +373,7 @@ def add_content(
     height: Optional[int] = None,
     aspect_ratio: Optional[str] = None,
     codec: Optional[str] = None,
+    artist: Optional[str] = None,
 ) -> int:
     """Add new content to the database."""
     cursor = conn.cursor()
@@ -210,12 +381,12 @@ def add_content(
         INSERT INTO content (
             title, content_type, series_name, season, episode, year,
             duration_seconds, original_path, file_hash,
-            width, height, aspect_ratio, codec
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            width, height, aspect_ratio, codec, artist
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         title, content_type, series_name, season, episode, year,
         duration_seconds, original_path, file_hash,
-        width, height, aspect_ratio, codec
+        width, height, aspect_ratio, codec, artist
     ))
     return cursor.lastrowid
 
@@ -320,6 +491,7 @@ def update_content_metadata(
     episode: Optional[int] = None,
     year: Optional[int] = None,
     tmdb_id: Optional[int] = None,
+    artist: Optional[str] = None,
 ) -> None:
     """Update content metadata from identification."""
     cursor = conn.cursor()
@@ -344,6 +516,9 @@ def update_content_metadata(
     if tmdb_id is not None:
         updates.append("tmdb_id = ?")
         values.append(tmdb_id)
+    if artist is not None:
+        updates.append("artist = ?")
+        values.append(artist)
 
     if updates:
         updates.append("updated_at = datetime('now')")
@@ -405,6 +580,46 @@ def clear_content_tags(conn: sqlite3.Connection, content_id: int) -> None:
     cursor.execute("DELETE FROM content_tags WHERE content_id = ?", (content_id,))
 
 
+def get_all_series_tags(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    """Get the most common tag set for each series in the database.
+
+    Returns:
+        Dict mapping series_name -> list of tag names (most common set)
+    """
+    cursor = conn.cursor()
+    # Get all series with identified/ready content
+    cursor.execute("""
+        SELECT DISTINCT series_name FROM content
+        WHERE series_name IS NOT NULL AND status IN ('identified', 'ready')
+    """)
+    series_names = [row["series_name"] for row in cursor.fetchall()]
+
+    result: dict[str, list[str]] = {}
+    for name in series_names:
+        # Get tag set for each episode, find the most common one
+        cursor.execute("""
+            SELECT c.id FROM content c
+            WHERE c.series_name = ? AND c.status IN ('identified', 'ready')
+        """, (name,))
+        episode_ids = [row["id"] for row in cursor.fetchall()]
+
+        if not episode_ids:
+            continue
+
+        # Count how often each tag set appears
+        tag_set_counts: dict[tuple, int] = {}
+        for eid in episode_ids:
+            tags = tuple(sorted(get_content_tags(conn, eid)))
+            tag_set_counts[tags] = tag_set_counts.get(tags, 0) + 1
+
+        # Most common tag set
+        best = max(tag_set_counts, key=tag_set_counts.get)
+        if best:
+            result[name] = list(best)
+
+    return result
+
+
 # Break point operations
 
 def add_break_point(
@@ -436,6 +651,19 @@ def clear_break_points(conn: sqlite3.Connection, content_id: int) -> None:
     """Clear all break points for content."""
     cursor = conn.cursor()
     cursor.execute("DELETE FROM break_points WHERE content_id = ?", (content_id,))
+
+
+def delete_content(conn: sqlite3.Connection, content_id: int) -> bool:
+    """Delete content and all associated data (tags, break points, ingest log).
+
+    Foreign keys with ON DELETE CASCADE handle cleanup automatically.
+
+    Returns:
+        True if a row was deleted, False if ID not found
+    """
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM content WHERE id = ?", (content_id,))
+    return cursor.rowcount > 0
 
 
 # Ingest log operations

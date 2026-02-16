@@ -23,7 +23,7 @@ class ChannelConfig:
     name: str
     tags: list[str] = field(default_factory=list)
     content_types: list[str] = field(default_factory=lambda: ["show", "movie"])
-    commercial_ratio: float = 0.0  # 0.0 = no commercials, 0.2 = 20% commercial time
+    commercial_ratio: float = 1.0  # 1.0 = fill remaining time with commercials, 0.0 = no commercials
 
 
 @dataclass
@@ -34,6 +34,7 @@ class IngestConfig:
     transcode_width: int = 640
     transcode_height: int = 480
     video_bitrate: str = "1500k"
+    transcode_threshold: str = "1100k"  # Skip transcode if source bitrate is below this
     audio_bitrate: str = "128k"
     keyframe_interval: int = 30  # GOP size for fast seeking
     widescreen_crop: int = 0  # Percent to crop from each side of 16:9 content (0=full letterbox, 12=moderate, 25=full crop)
@@ -77,7 +78,7 @@ def _parse_channel(data: dict) -> ChannelConfig:
         name=data.get("name", "Unknown"),
         tags=data.get("tags", []),
         content_types=data.get("content_types", ["show", "movie"]),
-        commercial_ratio=data.get("commercial_ratio", 0.0),
+        commercial_ratio=data.get("commercial_ratio", 1.0),
     )
 
 
@@ -125,6 +126,7 @@ def load_config(config_path: Optional[Path] = None) -> Config:
             transcode_width=ing.get("transcode_width", 640),
             transcode_height=ing.get("transcode_height", 480),
             video_bitrate=ing.get("video_bitrate", "1500k"),
+            transcode_threshold=ing.get("transcode_threshold", "1100k"),
             audio_bitrate=ing.get("audio_bitrate", "128k"),
             keyframe_interval=ing.get("keyframe_interval", 30),
             widescreen_crop=ing.get("widescreen_crop", 0),
@@ -196,6 +198,7 @@ def save_config(config: Config, config_path: Optional[Path] = None) -> None:
             "transcode_width": config.ingest.transcode_width,
             "transcode_height": config.ingest.transcode_height,
             "video_bitrate": config.ingest.video_bitrate,
+            "transcode_threshold": config.ingest.transcode_threshold,
             "audio_bitrate": config.ingest.audio_bitrate,
             "keyframe_interval": config.ingest.keyframe_interval,
             "widescreen_crop": config.ingest.widescreen_crop,

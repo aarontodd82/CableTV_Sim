@@ -4,6 +4,7 @@ import json
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional, Any
@@ -29,6 +30,7 @@ class MpvController:
         self._socket: Optional[socket.socket] = None
         self._pipe = None  # Windows named pipe file handle
         self._request_id = 0
+        self._ipc_lock = threading.Lock()  # Serialize all IPC access
 
     @property
     def is_running(self) -> bool:
@@ -172,6 +174,8 @@ class MpvController:
         """
         Send a command to mpv via IPC.
 
+        Thread-safe: all IPC access is serialized via _ipc_lock.
+
         Args:
             command: Command as list (e.g., ["loadfile", "/path/to/file"])
             wait_response: Wait for response
@@ -179,56 +183,57 @@ class MpvController:
         Returns:
             Response dict or None
         """
-        if not self.is_connected:
-            if not self._connect():
+        with self._ipc_lock:
+            if not self.is_connected:
+                if not self._connect():
+                    return None
+
+            self._request_id += 1
+            request = {
+                "command": command,
+                "request_id": self._request_id,
+            }
+
+            try:
+                message = json.dumps(request) + "\n"
+
+                if self._use_pipe:
+                    self._pipe.write(message.encode("utf-8"))
+                    self._pipe.flush()
+                    if wait_response:
+                        return self._read_pipe_response()
+                    return None
+                else:
+                    self._socket.sendall(message.encode("utf-8"))
+
+                    if wait_response:
+                        response_data = b""
+                        while True:
+                            chunk = self._socket.recv(4096)
+                            if not chunk:
+                                break
+                            response_data += chunk
+                            if b"\n" in response_data:
+                                break
+
+                        for line in response_data.decode("utf-8").strip().split("\n"):
+                            if line:
+                                try:
+                                    response = json.loads(line)
+                                    if response.get("request_id") == self._request_id:
+                                        return response
+                                except json.JSONDecodeError:
+                                    continue
+
+                    return None
+
+            except (socket.error, OSError) as e:
+                print(f"IPC error: {e}")
+                if self._use_pipe:
+                    self._pipe = None
+                else:
+                    self._socket = None
                 return None
-
-        self._request_id += 1
-        request = {
-            "command": command,
-            "request_id": self._request_id,
-        }
-
-        try:
-            message = json.dumps(request) + "\n"
-
-            if self._use_pipe:
-                self._pipe.write(message.encode("utf-8"))
-                self._pipe.flush()
-                if wait_response:
-                    return self._read_pipe_response()
-                return None
-            else:
-                self._socket.sendall(message.encode("utf-8"))
-
-                if wait_response:
-                    response_data = b""
-                    while True:
-                        chunk = self._socket.recv(4096)
-                        if not chunk:
-                            break
-                        response_data += chunk
-                        if b"\n" in response_data:
-                            break
-
-                    for line in response_data.decode("utf-8").strip().split("\n"):
-                        if line:
-                            try:
-                                response = json.loads(line)
-                                if response.get("request_id") == self._request_id:
-                                    return response
-                            except json.JSONDecodeError:
-                                continue
-
-                return None
-
-        except (socket.error, OSError) as e:
-            print(f"IPC error: {e}")
-            if self._use_pipe:
-                self._pipe = None
-            else:
-                self._socket = None
-            return None
 
     def _get_property(self, name: str) -> Any:
         """Get an mpv property value."""
@@ -258,17 +263,19 @@ class MpvController:
         if response is None:
             return False
 
-        # Wait for file to actually load before seeking
+        # Poll until mpv reports a playback position (file is loaded)
+        for _ in range(30):  # Up to 3 seconds
+            time.sleep(0.1)
+            pos = self._get_property("time-pos")
+            if pos is not None:
+                break
+
         if seek_seconds > 0:
-            # Poll until mpv reports a playback position (file is loaded)
-            for _ in range(30):  # Up to 3 seconds
-                time.sleep(0.1)
-                pos = self._get_property("time-pos")
-                if pos is not None:
-                    break
             self.seek(seek_seconds)
-        else:
-            time.sleep(0.2)
+
+        # Ensure playback is not paused — keep-open=yes leaves mpv paused
+        # when a file ends, and loadfile may inherit that paused state
+        self._set_property("pause", False)
 
         return True
 

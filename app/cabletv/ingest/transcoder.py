@@ -99,9 +99,9 @@ def build_transcode_command(
         if crop_pct > 0:
             # Crop sides first to reduce letterboxing, then scale to fit
             crop_frac = crop_pct / 100.0
-            vf = f"crop=iw*{1 - 2*crop_frac:.4f}:ih,scale={width}:-2:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
+            vf = f"crop=iw*{1 - 2*crop_frac:.4f}:ih,scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
         else:
-            vf = f"scale={width}:-2:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
+            vf = f"scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
     else:
         # Source is taller, pillarbox left/right
         vf = f"scale=-2:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
@@ -114,6 +114,7 @@ def build_transcode_command(
         "-i", str(input_path),
         "-map", "0:v:0",
         "-map", f"0:{audio_stream_index}" if audio_stream_index is not None else "0:a:0",
+        "-pix_fmt", "yuv420p",  # Force 8-bit output (10-bit sources break NVENC h264)
         "-vf", vf,
     ]
 
@@ -209,13 +210,27 @@ def transcode_file(
 
         # Check if already transcoded
         if output_path.exists() and not force:
+            # Validate the existing file isn't a truncated partial from ctrl+c
+            try:
+                existing_probe = probe_file(output_path)
+                source_probe = probe_file(input_path)
+                # Accept if output duration is at least 95% of source
+                if existing_probe.duration > 1 and existing_probe.duration >= source_probe.duration * 0.95:
+                    if verbose:
+                        print(f"Output already exists: {output_path}")
+                    relative_output = output_path.relative_to(root)
+                    update_content_normalized_path(conn, content_id, str(relative_output))
+                    update_content_status(conn, content_id, "transcoded")
+                    return True
+                if verbose:
+                    print(f"Partial file detected ({existing_probe.duration:.0f}s vs {source_probe.duration:.0f}s source): {content['title']}")
+            except Exception:
+                pass
+            # File is corrupt/partial — delete and re-transcode
             if verbose:
-                print(f"Output already exists: {output_path}")
-            # Update path and status
-            relative_output = output_path.relative_to(root)
-            update_content_normalized_path(conn, content_id, str(relative_output))
-            update_content_status(conn, content_id, "transcoded")
-            return True
+                print(f"Removing and re-transcoding: {output_path.name}")
+            output_path.unlink()
+            update_content_status(conn, content_id, "identified")
 
         # Probe source to check resolution
         probe = probe_file(input_path)
@@ -228,21 +243,22 @@ def transcode_file(
         needs_crop = config.ingest.widescreen_crop > 0 and source_ratio > (target_w / target_h + 0.1)
 
         if probe.width <= target_w and probe.height <= target_h and not needs_crop:
-            # Check bitrate — re-encode if over target, otherwise just copy
-            target_bps = int(config.ingest.video_bitrate.replace("k", "000"))
+            # Check bitrate — re-encode if over threshold, otherwise just copy
+            threshold_bps = int(config.ingest.transcode_threshold.replace("k", "000"))
             source_bps = probe.bitrate or 0
-            if source_bps > target_bps:
+            if source_bps > threshold_bps:
+                target_bps = int(config.ingest.video_bitrate.replace("k", "000"))
                 if verbose:
-                    print(f"Re-encoding (already {probe.width}x{probe.height} but {source_bps//1000}kbps > {target_bps//1000}kbps): {content['title']}")
+                    print(f"Re-encoding (already {probe.width}x{probe.height} but {source_bps//1000}kbps > {threshold_bps//1000}kbps threshold, target {target_bps//1000}kbps): {content['title']}")
                 # Fall through to normal transcode
             else:
                 if verbose:
-                    print(f"Copying (already {probe.width}x{probe.height}, {source_bps//1000}kbps): {content['title']}")
+                    print(f"Copying (already {probe.width}x{probe.height}, {source_bps//1000}kbps <= {threshold_bps//1000}kbps threshold): {content['title']}")
                 shutil.copy2(str(input_path), str(output_path))
                 relative_output = output_path.relative_to(root)
                 update_content_normalized_path(conn, content_id, str(relative_output))
                 update_content_status(conn, content_id, "transcoded")
-                log_ingest(conn, "transcode", "completed", content_id, "Copied - below target resolution and bitrate")
+                log_ingest(conn, "transcode", "completed", content_id, "Copied - below target resolution and bitrate threshold")
                 return True
 
         if verbose:
@@ -279,8 +295,11 @@ def transcode_file(
             dots = 0
 
         # Wait for completion, showing dots for progress
+        stderr_chunks = []
         while process.poll() is None:
-            process.stderr.read(1024)  # Consume stderr to prevent blocking
+            chunk = process.stderr.read(1024)
+            if chunk:
+                stderr_chunks.append(chunk)
             if verbose:
                 print(".", end="", flush=True)
                 dots += 1
@@ -289,12 +308,17 @@ def transcode_file(
                     print("            ", end="")
                     dots = 0
 
+        # Read any remaining stderr
+        remaining = process.stderr.read()
+        if remaining:
+            stderr_chunks.append(remaining)
+
         if verbose:
             print(" Done")
 
         # Check result
         if process.returncode != 0:
-            stderr = process.stderr.read()
+            stderr = "".join(stderr_chunks)
             raise RuntimeError(f"ffmpeg failed: {stderr[-500:]}")
 
         # Verify output

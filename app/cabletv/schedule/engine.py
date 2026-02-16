@@ -1,7 +1,7 @@
 """Schedule engine for deterministic content scheduling."""
 
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -18,7 +18,7 @@ from .commercials import get_current_commercial, calculate_slot_breakdown
 @dataclass
 class TimelineSegment:
     """A segment in the content block timeline."""
-    segment_type: str  # "content", "commercial", or "up_next"
+    segment_type: str  # "content", "commercial", or "info_bumper"
     start_offset: float  # Seconds from block start
     duration: float  # Duration of this segment
     # For content segments:
@@ -27,10 +27,11 @@ class TimelineSegment:
     break_index: int = 0  # Which break this is (for deterministic commercial selection)
 
 
-# Duration of "Coming Up Next" bumper in seconds
-UP_NEXT_DURATION = 8.0
-# Max number of up_next bumpers per slot
-UP_NEXT_PER_SLOT = 3
+
+
+# Guaranteed info bumper duration range (seconds)
+INFO_BUMPER_MIN = 5.0
+INFO_BUMPER_MAX = 8.0
 
 
 def build_content_timeline(
@@ -40,18 +41,20 @@ def build_content_timeline(
     seed: int = 0
 ) -> list[TimelineSegment]:
     """
-    Build a complete timeline for a content block including commercial breaks
-    and "Coming Up Next" bumpers.
+    Build a complete timeline for a content block including commercial breaks.
 
     The timeline interleaves content segments with commercial breaks at the
-    detected break points, plus end-of-slot padding. Up to UP_NEXT_PER_SLOT
-    breaks will include an "up_next" bumper (max 1 per break).
+    detected break points, plus end-of-slot padding. Commercial time is
+    distributed evenly across all breaks. One break per slot gets a guaranteed
+    info bumper (carved from commercial time) so the viewer always sees
+    what's on and what's coming up. Any additional time that can't be filled
+    with commercials also becomes an info bumper.
 
     Args:
         content_duration: Duration of the main content in seconds
         break_points: List of timestamps (in content time) where breaks occur
         total_slot_duration: Total duration of the slot allocation
-        seed: Seed for deterministic up_next placement
+        seed: Seed for deterministic info bumper placement
 
     Returns:
         List of TimelineSegment objects covering the entire slot duration
@@ -64,39 +67,31 @@ def build_content_timeline(
     # Number of commercial breaks = number of break points + 1 (for end padding)
     num_breaks = len(valid_breaks) + 1
 
-    # Only add up_next bumpers if there's enough commercial time
-    # (need at least UP_NEXT_DURATION per bumper plus some commercial time)
-    breaks_with_up_next: set[int] = set()
-    if total_commercial_time > UP_NEXT_DURATION:
-        # Determine which breaks get "up_next" bumpers (deterministic, max 1 per break)
-        # Select up to UP_NEXT_PER_SLOT breaks, but not end padding (last break)
+    # Distribute commercial time evenly across all breaks
+    commercial_per_break = total_commercial_time / num_breaks if num_breaks > 0 else 0
+
+    # Guarantee one info bumper per slot by carving time from one break.
+    # Pick a mid-content break if available, otherwise use end padding.
+    bumper_break = -1
+    bumper_duration = 0.0
+
+    if commercial_per_break >= INFO_BUMPER_MIN:
         rng = random.Random(seed)
-        available_breaks = list(range(num_breaks - 1)) if num_breaks > 1 else []  # Exclude end padding
-        rng.shuffle(available_breaks)
+        if valid_breaks:
+            bumper_break = rng.randint(0, len(valid_breaks) - 1)
+        else:
+            bumper_break = 0  # End padding is the only break
 
-        # Calculate how many up_next bumpers we can fit
-        max_up_next = min(UP_NEXT_PER_SLOT, len(available_breaks))
-        # Ensure we leave at least some commercial time after up_next bumpers
-        while max_up_next > 0:
-            up_next_time_needed = max_up_next * UP_NEXT_DURATION
-            if total_commercial_time - up_next_time_needed >= num_breaks:  # At least 1 sec per break
-                break
-            max_up_next -= 1
-
-        breaks_with_up_next = set(available_breaks[:max_up_next])
-
-    # Calculate time: subtract up_next time from total commercial time
-    up_next_total_time = len(breaks_with_up_next) * UP_NEXT_DURATION
-    adjusted_commercial_time = max(0, total_commercial_time - up_next_total_time)
-
-    # Distribute remaining commercial time evenly across all breaks
-    commercial_per_break = adjusted_commercial_time / num_breaks if num_breaks > 0 else 0
+        bumper_duration = min(INFO_BUMPER_MAX, commercial_per_break / 2)
+        bumper_duration = max(INFO_BUMPER_MIN, bumper_duration)
+        # Don't exceed the break's total time
+        bumper_duration = min(bumper_duration, commercial_per_break)
 
     segments: list[TimelineSegment] = []
     current_offset = 0.0
     content_position = 0.0
 
-    # Build segments: content, commercial (+ up_next), content, ...
+    # Build segments: content, commercial (+info_bumper), content, ...
     for i, break_point in enumerate(valid_breaks):
         # Content segment up to this break point
         content_segment_duration = break_point - content_position
@@ -109,25 +104,30 @@ def build_content_timeline(
             ))
             current_offset += content_segment_duration
 
-        # Commercial break
+        # Commercial break (shortened if this break has the info bumper)
         if commercial_per_break > 0:
-            segments.append(TimelineSegment(
-                segment_type="commercial",
-                start_offset=current_offset,
-                duration=commercial_per_break,
-                break_index=i,
-            ))
-            current_offset += commercial_per_break
+            comm_dur = commercial_per_break
+            if i == bumper_break:
+                comm_dur -= bumper_duration
 
-        # "Coming Up Next" bumper (at end of break, before content resumes)
-        if i in breaks_with_up_next:
-            segments.append(TimelineSegment(
-                segment_type="up_next",
-                start_offset=current_offset,
-                duration=UP_NEXT_DURATION,
-                break_index=i,
-            ))
-            current_offset += UP_NEXT_DURATION
+            if comm_dur > 0:
+                segments.append(TimelineSegment(
+                    segment_type="commercial",
+                    start_offset=current_offset,
+                    duration=comm_dur,
+                    break_index=i,
+                ))
+                current_offset += comm_dur
+
+            # Guaranteed info bumper at end of this break
+            if i == bumper_break:
+                segments.append(TimelineSegment(
+                    segment_type="info_bumper",
+                    start_offset=current_offset,
+                    duration=bumper_duration,
+                    break_index=i,
+                ))
+                current_offset += bumper_duration
 
         content_position = break_point
 
@@ -142,14 +142,29 @@ def build_content_timeline(
         ))
         current_offset += final_content_duration
 
-    # End-of-slot commercial padding (no up_next for end padding)
+    # End-of-slot commercial padding
+    end_break_idx = len(valid_breaks)
     if commercial_per_break > 0:
-        segments.append(TimelineSegment(
-            segment_type="commercial",
-            start_offset=current_offset,
-            duration=commercial_per_break,
-            break_index=len(valid_breaks),
-        ))
+        comm_dur = commercial_per_break
+        if end_break_idx == bumper_break:
+            comm_dur -= bumper_duration
+
+        if comm_dur > 0:
+            segments.append(TimelineSegment(
+                segment_type="commercial",
+                start_offset=current_offset,
+                duration=comm_dur,
+                break_index=end_break_idx,
+            ))
+            current_offset += comm_dur
+
+        if end_break_idx == bumper_break:
+            segments.append(TimelineSegment(
+                segment_type="info_bumper",
+                start_offset=current_offset,
+                duration=bumper_duration,
+                break_index=end_break_idx,
+            ))
 
     return segments
 
@@ -189,6 +204,8 @@ class ScheduleEntry:
     file_path: str
     channel_number: int
     slot_end_time: datetime  # When the slot(s) actually end (for commercial padding)
+    artist: Optional[str] = None
+    year: Optional[int] = None
 
     @property
     def is_playing(self) -> bool:
@@ -218,15 +235,6 @@ class CommercialEntry:
 
 
 @dataclass
-class UpNextEntry:
-    """A 'Coming Up Next' bumper."""
-    next_title: str
-    duration_seconds: float
-    remaining_seconds: float
-    channel_number: int
-
-
-@dataclass
 class NowPlaying:
     """Current playback state for a channel."""
     entry: ScheduleEntry
@@ -235,17 +243,13 @@ class NowPlaying:
     seek_position: float  # Where to seek in the file
     is_commercial: bool = False
     commercial: Optional[CommercialEntry] = None
-    is_up_next: bool = False
-    up_next: Optional[UpNextEntry] = None
 
     @property
     def slot_remaining_seconds(self) -> float:
         """Seconds until the entire slot block ends (including commercials)."""
         if self.is_commercial and self.commercial:
-            # We're in commercial, calculate from slot end
-            return self.remaining_seconds  # Already calculated for commercial
+            return self.remaining_seconds
         else:
-            # Main content - add commercial padding time
             return self.remaining_seconds + self.entry.commercial_padding_seconds
 
 
@@ -405,6 +409,74 @@ class ScheduleEngine:
 
         return set(selections.values())
 
+    def _what_is_on_continuous(
+        self,
+        channel_config: ChannelConfig,
+        when: datetime
+    ) -> Optional[NowPlaying]:
+        """
+        Continuous playback for channels with no commercials (e.g., music).
+
+        Creates a deterministic looping playlist from the channel's content pool.
+        Same time = same video at the same position, always.
+        """
+        pool = self.get_channel_pool(channel_config)
+        if not pool:
+            return None
+
+        # Sort by ID for deterministic base ordering, then shuffle with channel seed
+        sorted_pool = sorted(pool, key=lambda c: c["id"])
+        rng = random.Random(self.seed + channel_config.number)
+        rng.shuffle(sorted_pool)
+
+        # Calculate total playlist duration
+        total_duration = sum(c["duration_seconds"] for c in sorted_pool)
+        if total_duration <= 0:
+            return None
+
+        # Calculate position in the looping playlist
+        elapsed_from_epoch = (when - self.epoch).total_seconds()
+        position = elapsed_from_epoch % total_duration
+
+        # Walk through playlist to find current item
+        accumulated = 0.0
+        for content in sorted_pool:
+            item_duration = content["duration_seconds"]
+            if accumulated + item_duration > position:
+                # This is the current item
+                offset_in_item = position - accumulated
+                remaining = item_duration - offset_in_item
+
+                file_path = content.get("normalized_path") or content.get("original_path", "")
+                item_start_time = when - timedelta(seconds=offset_in_item)
+                item_end_time = item_start_time + timedelta(seconds=item_duration)
+
+                entry = ScheduleEntry(
+                    content_id=content["id"],
+                    title=content["title"],
+                    content_type=content["content_type"],
+                    start_time=item_start_time,
+                    end_time=item_end_time,
+                    duration_seconds=item_duration,
+                    file_path=file_path,
+                    channel_number=channel_config.number,
+                    slot_end_time=item_end_time,  # No commercial padding
+                    artist=content.get("artist"),
+                    year=content.get("year"),
+                )
+
+                return NowPlaying(
+                    entry=entry,
+                    elapsed_seconds=offset_in_item,
+                    remaining_seconds=remaining,
+                    seek_position=offset_in_item,
+                    is_commercial=False,
+                    commercial=None,
+                )
+            accumulated += item_duration
+
+        return None
+
     def what_is_on(
         self,
         channel_number: int,
@@ -436,6 +508,10 @@ class ScheduleEngine:
         channel_config = self.config.channel_map.get(channel_number)
         if not channel_config:
             return None
+
+        # Continuous mode for channels with no commercials (e.g., music)
+        if channel_config.commercial_ratio == 0.0:
+            return self._what_is_on_continuous(channel_config, when)
 
         # Find current slot
         current_slot = get_slot_number(when, self.epoch, self.slot_duration)
@@ -512,33 +588,16 @@ class ScheduleEngine:
                 is_commercial=False,
                 commercial=None,
             )
-        elif current_segment.segment_type == "up_next":
-            # We're showing a "Coming Up Next" bumper
+        elif current_segment.segment_type == "info_bumper":
+            # Guaranteed info bumper — black screen with mini-guide
             remaining_in_segment = current_segment.duration - offset_in_segment
-
-            # Figure out what's coming next on this channel
-            # "Next" is the content that starts after this slot block ends
-            next_slot = block_start_slot + slot_breakdown["slots_needed"]
-            next_content = self._select_content_for_slot(channel_config, next_slot)
-
-            next_title = next_content["title"] if next_content else "More Programming"
-
-            up_next_entry = UpNextEntry(
-                next_title=next_title,
-                duration_seconds=current_segment.duration,
-                remaining_seconds=remaining_in_segment,
-                channel_number=channel_number,
-            )
-
             return NowPlaying(
                 entry=entry,
                 elapsed_seconds=elapsed,
                 remaining_seconds=remaining_in_segment,
                 seek_position=0,
-                is_commercial=False,
-                commercial=None,
-                is_up_next=True,
-                up_next=up_next_entry,
+                is_commercial=True,
+                commercial=None,  # Triggers info bumper display in playback engine
             )
         else:
             # We're in a commercial break
@@ -728,3 +787,44 @@ class ScheduleEngine:
                 channel_content[channel.number] = {"id": content_id, "title": now_playing.entry.title}
 
         return collisions
+
+    def get_upcoming(
+        self,
+        channel_number: int,
+        count: int = 3
+    ) -> list[tuple[datetime, str]]:
+        """
+        Get upcoming programs on a channel (for info bumper display).
+
+        Walks forward from the current content's end to find
+        the next few programs.
+
+        Args:
+            channel_number: Channel number
+            count: Number of upcoming entries to return
+
+        Returns:
+            List of (start_time, title) tuples
+        """
+        now = datetime.now()
+        current = self.what_is_on(channel_number, now)
+        if not current:
+            return []
+
+        upcoming: list[tuple[datetime, str]] = []
+        # Start scanning from end of current content (slot_end_time for slot-based,
+        # end_time for continuous — but slot_end_time == end_time for continuous)
+        scan_time = current.entry.slot_end_time
+
+        for _ in range(count):
+            future = self.what_is_on(channel_number, scan_time + timedelta(seconds=0.1))
+            if not future:
+                break
+            # Build display title — include artist for music content
+            title = future.entry.title
+            if future.entry.artist:
+                title = f"{future.entry.artist} - {title}"
+            upcoming.append((future.entry.start_time, title))
+            scan_time = future.entry.end_time
+
+        return upcoming

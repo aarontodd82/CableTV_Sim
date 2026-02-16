@@ -9,148 +9,130 @@ schedule:
   seed: 42
 
 channels:
-  # --- Lower dial: General/broad channels ---
+  # --- Local / Broadcast (3-9) ---
   - number: 3
-    name: "Channel 3"
-    tags: ["drama", "comedy", "action"]
-    content_types: ["show", "movie"]
-    commercial_ratio: 0.0
-
-  - number: 5
-    name: "Five Star Movies"
-    tags: ["drama", "action", "thriller", "comedy"]
-    content_types: ["movie"]
-    commercial_ratio: 0.0
-
-  - number: 8
-    name: "Channel 8"
+    name: "WCTV 3"
     tags: ["comedy", "drama", "family"]
     content_types: ["show", "movie"]
-    commercial_ratio: 0.0
 
-  # --- Teens/20s: Genre-focused ---
-  - number: 12
-    name: "Action Plus"
-    tags: ["action", "adventure", "war"]
-    content_types: ["movie", "show"]
-    commercial_ratio: 0.0
+  - number: 5
+    name: "Channel 5"
+    tags: ["action", "adventure"]
+    content_types: ["show", "movie"]
 
+  - number: 7
+    name: "WPBS 7"
+    tags: ["educational", "documentary"]
+    content_types: ["show"]
+
+  - number: 9
+    name: "TV 9 Movies"
+    tags: ["action", "comedy", "drama", "family", "scifi"]
+    content_types: ["movie"]
+
+  # --- Basic Cable (15-28) ---
   - number: 15
-    name: "Comedy Gold"
+    name: "Comedy Central"
     tags: ["comedy", "sitcom"]
-    content_types: ["show", "movie"]
-    commercial_ratio: 0.0
+    content_types: ["show"]
 
-  - number: 18
-    name: "The Drama Channel"
-    tags: ["drama", "romance"]
-    content_types: ["show", "movie"]
-    commercial_ratio: 0.0
-
-  - number: 21
-    name: "Fright Night"
-    tags: ["horror", "thriller"]
-    content_types: ["movie", "show"]
-    commercial_ratio: 0.0
-
-  - number: 24
-    name: "Future Vision"
-    tags: ["scifi", "fantasy"]
-    content_types: ["movie", "show"]
-    commercial_ratio: 0.0
-
-  # --- Upper 20s/30s: Family & Specialty ---
-  - number: 27
-    name: "Family Together"
-    tags: ["family", "animation", "comedy"]
-    content_types: ["movie", "show"]
-    commercial_ratio: 0.0
-
-  - number: 30
-    name: "Cartoon Carousel"
-    tags: ["animation", "kids", "family"]
-    content_types: ["movie", "show"]
-    commercial_ratio: 0.0
-
-  - number: 33
-    name: "Kids Corner"
+  - number: 17
+    name: "Nickelodeon"
     tags: ["kids", "family", "animation"]
     content_types: ["show", "movie"]
+
+  - number: 20
+    name: "Cartoon Network"
+    tags: ["animation", "kids"]
+    content_types: ["show", "movie"]
+
+  - number: 24
+    name: "Sci-Fi Channel"
+    tags: ["scifi", "fantasy"]
+    content_types: ["show", "movie"]
+
+  - number: 25
+    name: "MTV"
+    tags: ["music"]
+    content_types: ["music"]
     commercial_ratio: 0.0
 
-  - number: 35
-    name: "Music Television"
-    tags: ["music"]
+  - number: 28
+    name: "USA Network"
+    tags: ["action", "adventure", "crime"]
     content_types: ["show", "movie"]
-    commercial_ratio: 0.0
+
+  - number: 30
+    name: "Disney Channel"
+    tags: ["disney"]
+    content_types: ["show", "movie"]
+
+  # --- Specialty Cable (32-48) ---
+  - number: 32
+    name: "TV Land"
+    tags: ["classic", "sitcom", "comedy"]
+    content_types: ["show"]
+
+  - number: 34
+    name: "Hallmark"
+    tags: ["romance"]
+    content_types: ["show", "movie"]
 
   - number: 36
-    name: "Mystery & Suspense"
-    tags: ["mystery", "thriller", "crime"]
-    content_types: ["movie", "show"]
-    commercial_ratio: 0.0
+    name: "A&E"
+    tags: ["mystery", "crime", "drama"]
+    content_types: ["show", "movie"]
 
-  # --- 40s: Niche genres ---
-  - number: 40
-    name: "True Stories"
-    tags: ["documentary", "history"]
-    content_types: ["movie", "show"]
-    commercial_ratio: 0.0
+  - number: 38
+    name: "Discovery Channel"
+    tags: ["documentary", "educational", "history"]
+    content_types: ["show", "movie"]
 
   - number: 42
     name: "The Arena"
     tags: ["gameshow", "sports"]
     content_types: ["show"]
-    commercial_ratio: 0.0
 
   - number: 44
-    name: "Discovery Zone"
-    tags: ["educational", "documentary"]
-    content_types: ["show", "movie"]
-    commercial_ratio: 0.0
-
-  - number: 43
-    name: "Classic Cinema"
-    tags: ["classic", "drama", "romance"]
-    content_types: ["movie", "show"]
-    commercial_ratio: 0.0
+    name: "AMC"
+    tags: ["classic", "action", "drama"]
+    content_types: ["movie"]
 
   - number: 46
+    name: "Fright TV"
+    tags: ["horror", "thriller"]
+    content_types: ["show", "movie"]
+
+  - number: 48
     name: "Western Frontier"
-    tags: ["western", "action", "adventure"]
-    content_types: ["movie", "show"]
-    commercial_ratio: 0.0
+    tags: ["western"]
+    content_types: ["show", "movie"]
 
-  - number: 49
-    name: "War Stories"
-    tags: ["war", "history", "action"]
-    content_types: ["movie", "show"]
-    commercial_ratio: 0.0
+  # --- Premium / Movie (50-62) ---
+  - number: 50
+    name: "TNT"
+    tags: ["drama", "action"]
+    content_types: ["show", "movie"]
 
-  # --- 50s: Premium/specialty ---
   - number: 52
-    name: "Romance & More"
-    tags: ["romance", "drama", "comedy"]
-    content_types: ["movie", "show"]
-    commercial_ratio: 0.0
+    name: "TBS"
+    tags: ["comedy", "family"]
+    content_types: ["show", "movie"]
 
   - number: 55
-    name: "Crime Files"
-    tags: ["crime", "mystery", "thriller"]
-    content_types: ["movie", "show"]
-    commercial_ratio: 0.0
+    name: "HBO"
+    tags: ["action", "comedy", "drama", "thriller"]
+    content_types: ["movie"]
 
   - number: 58
-    name: "After Hours"
-    tags: ["thriller", "horror", "drama"]
-    content_types: ["movie", "show"]
-    commercial_ratio: 0.0
+    name: "Cinemax"
+    tags: ["action", "scifi", "horror", "thriller"]
+    content_types: ["movie"]
 
   - number: 62
-    name: "Cinema Showcase"
-    tags: ["drama", "action", "scifi", "classic"]
+    name: "TCM"
+    tags: ["classic"]
     content_types: ["movie"]
-    commercial_ratio: 0.0
 
 ingest:
   # TMDB API key - get one free at https://www.themoviedb.org/settings/api
@@ -164,6 +146,7 @@ ingest:
   transcode_height: 480
   # Bitrate settings
   video_bitrate: "750k"
+  transcode_threshold: "1100k"  # Skip transcode if source is below this
   audio_bitrate: "128k"
   # Keyframe interval for fast seeking (every N frames)
   keyframe_interval: 30

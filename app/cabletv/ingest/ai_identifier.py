@@ -10,7 +10,8 @@ from typing import Optional
 from ..config import Config
 from ..db import (
     db_connection, get_content_by_status, update_content_status,
-    update_content_metadata, add_tag_to_content, log_ingest
+    update_content_metadata, add_tag_to_content, get_content_tags,
+    get_all_series_tags, log_ingest
 )
 from .identifier import TMDBClient
 
@@ -20,7 +21,7 @@ VALID_TAGS = {
     "action", "adventure", "animation", "comedy", "crime", "documentary",
     "drama", "educational", "family", "fantasy", "gameshow", "history",
     "horror", "kids", "music", "mystery", "romance", "scifi", "thriller",
-    "war", "western", "classic", "sitcom", "cult", "sports",
+    "western", "classic", "disney", "sitcom", "sports",
 }
 
 # TMDB tool definitions for Claude
@@ -86,6 +87,27 @@ TMDB_TOOLS = [
     },
 ]
 
+MUSIC_SYSTEM_PROMPT = """\
+You are a music librarian identifying music video files for a cable TV simulator. You receive batches of filenames.
+
+Your job:
+1. Examine each filename to extract the artist name, song title, and year.
+2. Standardize artist names (correct capitalization, full names).
+3. Return a JSON array with one entry per file, in the same order as the input.
+
+Each entry must have these fields:
+- "index": integer, the 0-based index matching the input list
+- "artist": artist/band name (properly capitalized)
+- "title": song title (just the song name, not "Artist - Title")
+- "year": release year if present in filename, null if unknown
+- "content_type": always "music"
+- "tags": always ["music"]
+- "skip": true if this file is not a music video (e.g. playlist files, artwork), false otherwise
+
+Expected filename format: "Artist - Title (Year).mp4" but handle variations.
+
+IMPORTANT: Respond with ONLY the JSON array. No markdown, no explanation, no commentary. Just [ ... ]."""
+
 SYSTEM_PROMPT = """\
 You are a media librarian identifying video files for a cable TV simulator. You receive batches of filenames grouped by directory.
 
@@ -103,7 +125,7 @@ Each entry in your JSON response must have these fields:
 - "episode": episode number for shows, null for movies
 - "year": release year (from TMDB if found, parsed from filename otherwise)
 - "tmdb_id": TMDB ID if found, null otherwise
-- "tags": array of exactly 2 genre tags from this valid set: action, adventure, animation, comedy, crime, documentary, drama, educational, family, fantasy, gameshow, history, horror, kids, music, mystery, romance, scifi, thriller, war, western, classic, sitcom, cult, sports. Only use 3 tags if there is a very strong reason (e.g. an animated kids comedy).
+- "tags": array of exactly 2 genre tags from this valid set: action, adventure, animation, comedy, crime, documentary, drama, educational, family, fantasy, gameshow, history, horror, kids, music, mystery, romance, scifi, thriller, western, classic, disney, sitcom, sports. Only use 3 tags if there is a very strong reason (e.g. an animated kids comedy). ADDITIONALLY: if the content was released before 1980, add "classic" as a bonus tag. If the content is produced by Walt Disney Pictures, Walt Disney Animation Studios, or Pixar (or is a Disney Channel original), add "disney" as a bonus tag. These bonus tags stack on top of the normal 2 genre tags.
 - "skip": true if this file should be skipped (not a movie/show, e.g. samples, extras), false otherwise
 
 Guidelines:
@@ -191,12 +213,42 @@ def _execute_tool(client: TMDBClient, name: str, args: dict) -> str:
         return json.dumps({"error": str(e)})
 
 
-def _build_batch_message(directory: str, files: list[dict]) -> str:
-    """Build the user message for a batch of files."""
-    lines = [f"Directory: {directory}", "", "Files to identify:"]
+def _build_batch_message(directory: str, files: list[dict], series_tags: Optional[dict[str, list[str]]] = None) -> str:
+    """Build the user message for a batch of files.
+
+    Args:
+        directory: Parent directory path
+        files: List of file info dicts
+        series_tags: Optional mapping of series_name -> existing tags for consistency
+    """
+    lines = [f"Directory: {directory}", ""]
+
+    # If we know existing tags for series in this directory, tell the AI
+    if series_tags:
+        matched = _match_series_context(directory, series_tags)
+        for name, tags in matched.items():
+            lines.append(f'NOTE: Existing episodes of "{name}" are tagged: {", ".join(tags)}')
+            lines.append("Use these same tags unless there is a very strong reason not to.")
+            lines.append("")
+
+    lines.append("Files to identify:")
     for i, f in enumerate(files):
         lines.append(f"  [{i}] {f['filename']}  (type: {f['content_type']}, duration: {f['duration_seconds']:.0f}s)")
     return "\n".join(lines)
+
+
+def _match_series_context(directory: str, series_tags: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Match directory path components against known series names.
+
+    Checks if any known series name appears in the directory path
+    (case-insensitive). Returns matching series -> tags.
+    """
+    dir_lower = directory.lower()
+    matched = {}
+    for name, tags in series_tags.items():
+        if name.lower() in dir_lower:
+            matched[name] = tags
+    return matched
 
 
 def _extract_xml_tool_calls(text: str) -> list[dict]:
@@ -261,10 +313,15 @@ def _process_batch(
     directory: str,
     files: list[dict],
     verbose: bool = True,
+    series_tags: Optional[dict[str, list[str]]] = None,
 ) -> Optional[list[dict]]:
     """Send a batch to Claude and process tool calls until we get a final response."""
-    user_message = _build_batch_message(directory, files)
-    tools = TMDB_TOOLS if tmdb_client else []
+    # Detect music batches — use music-specific prompt with no TMDB tools
+    is_music = files and files[0].get("content_type") == "music"
+    system_prompt = MUSIC_SYSTEM_PROMPT if is_music else SYSTEM_PROMPT
+
+    user_message = _build_batch_message(directory, files, series_tags=series_tags)
+    tools = [] if is_music else (TMDB_TOOLS if tmdb_client else [])
 
     messages = [{"role": "user", "content": user_message}]
 
@@ -273,7 +330,7 @@ def _process_batch(
         kwargs = dict(
             model="claude-sonnet-4-20250514",
             max_tokens=8192,
-            system=SYSTEM_PROMPT,
+            system=system_prompt,
             messages=messages,
         )
         if tools:
@@ -396,19 +453,30 @@ def ai_identify_content(config: Config, verbose: bool = True) -> dict:
         if verbose:
             print(f"Found {len(content_list)} items to identify")
 
-        # Skip commercials/bumpers first
+        # Skip commercials/bumpers first; group music separately
         regular_content = []
+        music_content = []
         for content in content_list:
             if content["content_type"] in ("commercial", "bumper"):
                 update_content_status(conn, content["id"], "identified")
                 stats["skipped"] += 1
+            elif content["content_type"] == "music":
+                music_content.append(content)
             else:
                 regular_content.append(content)
+
+        # Merge music back into regular for AI processing (they get a different prompt)
+        regular_content.extend(music_content)
 
         if not regular_content:
             if verbose:
                 print("All items are commercials/bumpers, skipped")
             return stats
+
+        # Load existing series tags for consistency (preventative)
+        series_tags = get_all_series_tags(conn)
+        if verbose and series_tags:
+            print(f"Loaded tag context for {len(series_tags)} existing series")
 
         # Group by parent directory
         dir_groups = defaultdict(list)
@@ -436,7 +504,8 @@ def ai_identify_content(config: Config, verbose: bool = True) -> dict:
 
                 try:
                     results = _process_batch(
-                        anthropic_client, tmdb_client, directory, batch, verbose=verbose
+                        anthropic_client, tmdb_client, directory, batch, verbose=verbose,
+                        series_tags=series_tags
                     )
 
                     if not results:
@@ -469,6 +538,7 @@ def ai_identify_content(config: Config, verbose: bool = True) -> dict:
                         episode = entry.get("episode")
                         year = entry.get("year")
                         tmdb_id = entry.get("tmdb_id")
+                        artist = entry.get("artist")
                         content_type = entry.get("content_type", file_info["content_type"])
 
                         # Update metadata
@@ -480,6 +550,7 @@ def ai_identify_content(config: Config, verbose: bool = True) -> dict:
                             episode=episode,
                             year=year,
                             tmdb_id=tmdb_id,
+                            artist=artist,
                         )
 
                         # Update content_type if AI changed it
@@ -534,3 +605,78 @@ def ai_identify_content(config: Config, verbose: bool = True) -> dict:
         print(f"To redo: cabletv content reset <id> [id ...] && cabletv ingest identify")
 
     return stats
+
+
+def check_tag_consistency(verbose: bool = True) -> list[dict]:
+    """Check that all episodes of each series have consistent tags.
+
+    Returns:
+        List of dicts with inconsistency info:
+        [{"series": str, "total": int, "tag_sets": [(tags, count), ...], "suggestion": [str]}]
+    """
+    from ..db import db_connection, get_content_tags
+
+    inconsistencies = []
+
+    with db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT DISTINCT series_name FROM content
+            WHERE series_name IS NOT NULL AND status IN ('identified', 'ready')
+            ORDER BY series_name
+        """)
+        series_names = [row["series_name"] for row in cursor.fetchall()]
+
+        for name in series_names:
+            cursor.execute("""
+                SELECT id FROM content
+                WHERE series_name = ? AND status IN ('identified', 'ready')
+            """, (name,))
+            episodes = cursor.fetchall()
+
+            tag_set_counts: dict[tuple, list[int]] = {}
+            for ep in episodes:
+                tags = tuple(sorted(get_content_tags(conn, ep["id"])))
+                if tags not in tag_set_counts:
+                    tag_set_counts[tags] = []
+                tag_set_counts[tags].append(ep["id"])
+
+            if len(tag_set_counts) <= 1:
+                continue
+
+            # Sort by count descending
+            sorted_sets = sorted(tag_set_counts.items(), key=lambda x: len(x[1]), reverse=True)
+            most_common = list(sorted_sets[0][0])
+
+            inconsistencies.append({
+                "series": name,
+                "total": len(episodes),
+                "tag_sets": [(list(tags), ids) for tags, ids in sorted_sets],
+                "suggestion": most_common,
+            })
+
+    if verbose:
+        if not inconsistencies:
+            print("\nTAG CONSISTENCY: All series have consistent tags.")
+        else:
+            print("\n" + "=" * 70)
+            print("TAG CONSISTENCY CHECK")
+            print("=" * 70)
+            for info in inconsistencies:
+                ep_word = "episode" if info["total"] == 1 else "episodes"
+                print(f"\nWARNING: {info['series']} ({info['total']} {ep_word}) has inconsistent tags:")
+                for tags, ids in info["tag_sets"]:
+                    n = len(ids)
+                    ep_w = "episode" if n == 1 else "episodes"
+                    print(f"  {n:>4} {ep_w}: {', '.join(tags) if tags else '(none)'}")
+                suggestion = ", ".join(info["suggestion"]) if info["suggestion"] else "(none)"
+                print(f"  Suggestion: apply most common tags ({suggestion}) to all")
+                id_list = " ".join(
+                    str(i) for tags, ids in info["tag_sets"][1:]
+                    for i in ids
+                )
+                if id_list:
+                    print(f"  Fix: cabletv content edit {id_list} --tags \"{suggestion}\"")
+            print("=" * 70)
+
+    return inconsistencies

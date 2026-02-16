@@ -210,10 +210,13 @@ def run_full_pipeline(
     if skip_tmdb:
         all_stats["identify"] = skip_identification(verbose=verbose)
     elif use_ai:
-        from .ai_identifier import ai_identify_content
+        from .ai_identifier import ai_identify_content, check_tag_consistency
         all_stats["identify"] = ai_identify_content(config, verbose=verbose)
+        check_tag_consistency(verbose=verbose)
     else:
         all_stats["identify"] = identify_content(config, auto=auto, verbose=verbose)
+        from .ai_identifier import check_tag_consistency
+        check_tag_consistency(verbose=verbose)
 
     # Stage 3: Transcode
     if verbose:

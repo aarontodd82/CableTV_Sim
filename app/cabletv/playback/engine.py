@@ -25,6 +25,7 @@ class PlaybackEngine:
         self._current_channel: Optional[int] = None
         self._current_playing: Optional[NowPlaying] = None
         self._timer: Optional[threading.Timer] = None
+        self._music_end_timer: Optional[threading.Timer] = None
         self._lock = threading.Lock()
         self._on_channel_change: Optional[Callable[[int], None]] = None
         self._on_content_change: Optional[Callable[[NowPlaying], None]] = None
@@ -67,9 +68,8 @@ class PlaybackEngine:
         """
         Tune to a specific channel.
 
-        Handles both main content and commercial segments. When tuning to a channel,
-        checks if we're currently in a commercial break (padding time between content
-        end and slot end) and plays the appropriate commercial.
+        Handles main content, commercial segments, and info bumpers.
+        Lock is held only for state reads/writes, not during mpv IPC calls.
 
         Args:
             channel_number: Channel number to tune to
@@ -82,98 +82,90 @@ class PlaybackEngine:
             print(f"Channel {channel_number} not found")
             return False
 
+        # Phase 1: Compute what to play and update state (lock held, no IPC)
+        play_action = None
+        file_path = None
+        seek_position = 0
+        now_playing = None
+
         with self._lock:
             # Cancel any pending content switch timer
             if self._timer:
                 self._timer.cancel()
                 self._timer = None
+            if self._music_end_timer:
+                self._music_end_timer.cancel()
+                self._music_end_timer = None
 
             # Get what's playing on this channel
             now_playing = self.schedule.what_is_on(channel_number)
 
             if not now_playing:
-                print(f"No content available for channel {channel_number}")
-                self._show_no_content_message(channel_number)
                 self._current_channel = channel_number
                 self._current_playing = None
-                return False
-
-            # Determine what to play based on segment type
-            root = get_drive_root()
-
-            if now_playing.is_up_next and now_playing.up_next:
-                # We're in a "Coming Up Next" bumper - show black screen with OSD
-                self._current_channel = channel_number
-                self._current_playing = now_playing
-                self._show_up_next_message(channel_number, now_playing.up_next.next_title, now_playing.remaining_seconds)
-                self._schedule_next_content()
-
-                # Fire callbacks
-                if self._on_channel_change:
-                    self._on_channel_change(channel_number)
-                if self._on_content_change:
-                    self._on_content_change(now_playing)
-
-                return True
-            elif now_playing.is_commercial and now_playing.commercial:
-                # We're in a commercial break - play the commercial
-                file_path = root / now_playing.commercial.file_path
-                seek_position = now_playing.commercial.seek_position
-                content_label = f"Commercial: {now_playing.commercial.title}"
-            elif now_playing.is_commercial and not now_playing.commercial:
-                # We're in commercial time but no commercials available
-                # Show a "please stand by" type message and schedule next content
-                print(f"In commercial break but no commercials available for channel {channel_number}")
-                self._current_channel = channel_number
-                self._current_playing = now_playing
-                self._show_standby_message(channel_number, now_playing.remaining_seconds)
-                self._schedule_next_content()
-
-                # Fire callbacks
-                if self._on_channel_change:
-                    self._on_channel_change(channel_number)
-                if self._on_content_change:
-                    self._on_content_change(now_playing)
-
-                return True
+                play_action = "no_content"
             else:
-                # Normal main content
-                file_path = root / now_playing.entry.file_path
-                seek_position = now_playing.seek_position
-                content_label = now_playing.entry.title
+                root = get_drive_root()
 
-            if not file_path.exists():
-                print(f"Content file not found: {file_path}")
-                self._show_no_content_message(channel_number)
-                return False
+                if now_playing.is_commercial and now_playing.commercial:
+                    file_path = root / now_playing.commercial.file_path
+                    seek_position = now_playing.commercial.seek_position
+                    play_action = "play_file"
+                elif now_playing.is_commercial and not now_playing.commercial:
+                    play_action = "info_bumper"
+                else:
+                    file_path = root / now_playing.entry.file_path
+                    seek_position = now_playing.seek_position
+                    play_action = "play_file"
 
-            # Play the content
-            success = self.mpv.play_file(
-                str(file_path),
-                seek_seconds=seek_position
-            )
+                # Check file exists
+                if play_action == "play_file" and not file_path.exists():
+                    print(f"Content file not found: {file_path}")
+                    play_action = "no_content"
 
+                # Update state
+                self._current_channel = channel_number
+                self._current_playing = now_playing
+
+        # Phase 2: Execute mpv commands (NO lock — IPC has its own lock)
+        if play_action == "no_content":
+            self._show_no_content_message(channel_number)
+            return False
+
+        elif play_action == "info_bumper":
+            self._show_info_bumper(channel_number, now_playing.remaining_seconds)
+
+        elif play_action == "play_file":
+            success = self.mpv.play_file(str(file_path), seek_seconds=seek_position)
             if not success:
                 print(f"Failed to play {file_path}")
                 return False
 
-            # Update state
-            self._current_channel = channel_number
-            self._current_playing = now_playing
+            if now_playing and now_playing.entry.content_type == "music":
+                # Music videos: show artist/title/year instead of channel OSD
+                self._show_music_osd(now_playing)
+                # Schedule end-of-video OSD
+                remaining = now_playing.remaining_seconds
+                if remaining > 10:
+                    delay = remaining - 5
+                    self._music_end_timer = threading.Timer(
+                        delay, self._show_music_osd, args=[now_playing])
+                    self._music_end_timer.daemon = True
+                    self._music_end_timer.start()
+            else:
+                self._show_channel_osd(channel_number)
 
-            # Show channel OSD
-            self._show_channel_osd(channel_number)
-
-            # Schedule next content (handles both end of main content and end of commercial)
+        # Phase 3: Schedule next transition timer (lock held)
+        with self._lock:
             self._schedule_next_content()
 
-            # Fire callbacks
-            if self._on_channel_change:
-                self._on_channel_change(channel_number)
-            if self._on_content_change:
-                self._on_content_change(now_playing)
+        # Phase 4: Fire callbacks (NO lock — avoids deadlock)
+        if self._on_channel_change:
+            self._on_channel_change(channel_number)
+        if self._on_content_change and now_playing:
+            self._on_content_change(now_playing)
 
-            return True
+        return True
 
     def _show_channel_osd(self, channel_number: int) -> None:
         """Show channel number and name on OSD."""
@@ -192,91 +184,92 @@ class PlaybackEngine:
         name = channel_config.name if channel_config else f"Channel {channel_number}"
         self.mpv.show_osd_message(f"{channel_number}\n{name}\nNo content available", 3000)
 
-    def _show_standby_message(self, channel_number: int, seconds_remaining: float) -> None:
-        """Show standby message when in commercial break but no commercials available."""
-        channel_config = self.config.channel_map.get(channel_number)
-        name = channel_config.name if channel_config else f"Channel {channel_number}"
-        # Show a brief standby message - mpv will show black screen
-        self.mpv.show_osd_message(
-            f"{channel_number} - {name}\nPlease Stand By\n{int(seconds_remaining)}s until next program",
-            min(3000, int(seconds_remaining * 1000))
-        )
+    def _show_info_bumper(self, channel_number: int, seconds_remaining: float) -> None:
+        """Show info bumper during gaps in commercial breaks.
 
-    def _show_up_next_message(self, channel_number: int, next_title: str, seconds_remaining: float) -> None:
-        """Show 'Coming Up Next' bumper with black screen and OSD."""
+        For gaps under 3 seconds, just shows black screen.
+        For longer gaps, shows a mini-guide with current and upcoming programs.
+        """
         channel_config = self.config.channel_map.get(channel_number)
         name = channel_config.name if channel_config else f"Channel {channel_number}"
-        # Stop current playback to show black screen
+
+        # Stop playback to show black screen
         self.mpv.stop()
-        # Show OSD with what's coming next - display for entire bumper duration
-        self.mpv.show_osd_message(
-            f"{channel_number} - {name}\n\nComing Up Next:\n{next_title}",
-            int(seconds_remaining * 1000)
-        )
+
+        if seconds_remaining < 3:
+            # Too short for text — just stay black
+            return
+
+        # Build mini-guide: current program + upcoming
+        now_playing = self._current_playing
+        lines = [f"Ch {channel_number} - {name}", ""]
+
+        if now_playing:
+            lines.append(f"Now:  {now_playing.entry.title}")
+
+        upcoming = self.schedule.get_upcoming(channel_number, count=2)
+        for start_time, title in upcoming:
+            time_str = start_time.strftime("%I:%M %p").lstrip("0")
+            lines.append(f"{time_str}  {title}")
+
+        self.mpv.show_osd_message("\n".join(lines), int(seconds_remaining * 1000))
+
+    def _show_music_osd(self, now_playing: NowPlaying) -> None:
+        """Show artist / title / year OSD for music videos."""
+        entry = now_playing.entry
+        lines = []
+        if entry.artist:
+            lines.append(entry.artist)
+        lines.append(entry.title)
+        if entry.year:
+            lines.append(str(entry.year))
+        self.mpv.show_osd_message("\n".join(lines), 5000)
 
     def _schedule_next_content(self) -> None:
         """
-        Schedule timer for when current content/commercial/up_next ends.
+        Schedule timer for when current content/commercial/bumper ends.
 
-        When main content ends, we transition to commercials (if any).
-        When a commercial ends, we re-tune to get the next commercial or content.
-        When an up_next bumper ends, we re-tune to get the next segment.
+        Must be called with self._lock held.
         """
         if not self._current_playing:
             return
 
         # Calculate time until we need to switch
-        if self._current_playing.is_up_next:
-            # We're showing an up_next bumper - wait for it to finish
-            remaining = self._current_playing.remaining_seconds
-        elif self._current_playing.is_commercial and self._current_playing.commercial:
-            # We're playing a commercial - schedule for when THIS commercial ends
+        if self._current_playing.is_commercial and self._current_playing.commercial:
             remaining = self._current_playing.commercial.remaining_seconds
-        elif self._current_playing.is_commercial:
-            # Commercial break but no commercial playing (standby) - wait for slot end
-            remaining = self._current_playing.remaining_seconds
         else:
-            # Main content - schedule for when it ends (commercials or next content follows)
             remaining = self._current_playing.remaining_seconds
 
         if remaining > 0:
-            # Add a small buffer to ensure we're past the end
-            delay = remaining + 0.5
+            delay = remaining + 0.15
             self._timer = threading.Timer(delay, self._on_content_end)
             self._timer.daemon = True
             self._timer.start()
 
     def _on_content_end(self) -> None:
-        """Called when current content ends."""
+        """Called when current content/commercial/bumper ends."""
         channel = None
         with self._lock:
             if self._current_channel:
-                # Re-tune to the same channel to get next content
-                # This will get the next scheduled content
                 channel = self._current_channel
                 self._timer = None
 
         # Tune outside the lock to avoid deadlock
         if channel:
-            self.tune_to(channel)
+            try:
+                self.tune_to(channel)
+            except Exception as e:
+                print(f"Error during content transition: {e}")
 
     def channel_up(self) -> bool:
-        """
-        Switch to next channel.
-
-        Returns:
-            True if successful
-        """
+        """Switch to next channel."""
         if not self._current_channel:
-            # Start at default channel
             return self.tune_to(self.config.playback.default_channel)
 
-        # Get sorted channel numbers
         channels = sorted(self.config.channel_map.keys())
         if not channels:
             return False
 
-        # Find current index
         try:
             current_idx = channels.index(self._current_channel)
             next_idx = (current_idx + 1) % len(channels)
@@ -285,12 +278,7 @@ class PlaybackEngine:
             return self.tune_to(channels[0])
 
     def channel_down(self) -> bool:
-        """
-        Switch to previous channel.
-
-        Returns:
-            True if successful
-        """
+        """Switch to previous channel."""
         if not self._current_channel:
             return self.tune_to(self.config.playback.default_channel)
 
@@ -307,13 +295,18 @@ class PlaybackEngine:
 
     def get_status(self) -> dict:
         """
-        Get current playback status.
+        Get current playback status. Thread-safe.
 
-        Returns:
-            Dict with status information including commercial state
+        State snapshot is taken under lock; mpv IPC calls are outside
+        (mpv has its own IPC lock).
         """
+        # Snapshot state under lock
+        with self._lock:
+            channel = self._current_channel
+            playing = self._current_playing
+
         status = {
-            "channel": self._current_channel,
+            "channel": channel,
             "channel_name": None,
             "playing": None,
             "position": None,
@@ -321,18 +314,16 @@ class PlaybackEngine:
             "remaining": None,
             "is_commercial": False,
             "commercial": None,
-            "is_up_next": False,
-            "up_next": None,
             "slot_remaining": None,
         }
 
-        if self._current_channel:
-            channel_config = self.config.channel_map.get(self._current_channel)
+        if channel:
+            channel_config = self.config.channel_map.get(channel)
             if channel_config:
                 status["channel_name"] = channel_config.name
 
-        if self._current_playing:
-            entry = self._current_playing.entry
+        if playing:
+            entry = playing.entry
             status["playing"] = {
                 "title": entry.title,
                 "content_type": entry.content_type,
@@ -341,13 +332,11 @@ class PlaybackEngine:
                 "slot_end_time": entry.slot_end_time.isoformat(),
             }
 
-            # Include commercial and up_next state
-            status["is_commercial"] = self._current_playing.is_commercial
-            status["is_up_next"] = self._current_playing.is_up_next
-            status["slot_remaining"] = self._current_playing.slot_remaining_seconds
+            status["is_commercial"] = playing.is_commercial
+            status["slot_remaining"] = playing.slot_remaining_seconds
 
-            if self._current_playing.is_commercial and self._current_playing.commercial:
-                commercial = self._current_playing.commercial
+            if playing.is_commercial and playing.commercial:
+                commercial = playing.commercial
                 status["commercial"] = {
                     "title": commercial.title,
                     "duration": commercial.duration_seconds,
@@ -355,21 +344,13 @@ class PlaybackEngine:
                     "main_content_title": commercial.main_content_title,
                 }
 
-            if self._current_playing.is_up_next and self._current_playing.up_next:
-                up_next = self._current_playing.up_next
-                status["up_next"] = {
-                    "next_title": up_next.next_title,
-                    "duration": up_next.duration_seconds,
-                    "remaining": up_next.remaining_seconds,
-                }
-
-            # Get live position from mpv if available
+            # Get live position from mpv (safe — mpv has its own IPC lock)
             position = self.mpv.get_position()
             if position is not None:
                 status["position"] = position
-                if self._current_playing.is_commercial and self._current_playing.commercial:
-                    status["duration"] = self._current_playing.commercial.duration_seconds
-                    status["remaining"] = max(0, self._current_playing.commercial.remaining_seconds)
+                if playing.is_commercial and playing.commercial:
+                    status["duration"] = playing.commercial.duration_seconds
+                    status["remaining"] = max(0, playing.commercial.remaining_seconds)
                 else:
                     status["duration"] = entry.duration_seconds
                     status["remaining"] = max(0, entry.duration_seconds - position)
@@ -382,6 +363,9 @@ class PlaybackEngine:
             if self._timer:
                 self._timer.cancel()
                 self._timer = None
+            if self._music_end_timer:
+                self._music_end_timer.cancel()
+                self._music_end_timer = None
 
         self.mpv.stop()
         self._current_playing = None
