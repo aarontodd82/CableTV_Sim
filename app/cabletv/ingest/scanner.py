@@ -157,8 +157,15 @@ def scan_directory(
         cursor.execute("SELECT original_path FROM content")
         known_paths = {row[0] for row in cursor.fetchall()}
 
+        # Filenames to always skip (common junk bundled with downloads)
+        skip_names = {"sample", "rarbg", "rarbg_do_not_mirror"}
+
         for path in directory.rglob("*"):
             if not path.is_file() or not is_video_file(path):
+                continue
+
+            if path.stem.lower() in skip_names:
+                stats["skipped"] += 1
                 continue
 
             stats["scanned"] += 1
