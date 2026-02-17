@@ -702,13 +702,20 @@ class ScheduleEngine:
         end_time = start_time + timedelta(hours=hours)
         guide: dict[int, list[ScheduleEntry]] = {}
 
+        # Align walker to the slot boundary at or before start_time so that
+        # every check point lands on a :00/:30 boundary.  This prevents
+        # non-slot-aligned start_times (e.g. 10:50 from 10-minute windows)
+        # from producing odd clipped times in the guide grid.
+        first_slot = get_slot_number(start_time, self.epoch, self.slot_duration)
+        walker_start = get_slot_start(first_slot, self.epoch, self.slot_duration)
+
         for channel_num in channels:
             channel_config = self.config.channel_map.get(channel_num)
             if not channel_config:
                 continue
 
             entries = []
-            current_time = start_time
+            current_time = walker_start
 
             while current_time < end_time:
                 now_playing = self.what_is_on(channel_num, current_time)
