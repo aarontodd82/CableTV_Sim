@@ -46,6 +46,8 @@ class PlaybackConfig:
     mpv_ipc_port: int = 9876
     osd_duration: float = 2.0  # Seconds to show channel OSD
     default_channel: int = 2
+    screen: int = -1  # Display index for fullscreen (-1 = default/primary)
+    overscan: float = 0.0  # Overscan compensation as percentage (e.g. 5.0 = 5% margin on each edge)
 
 
 @dataclass
@@ -158,6 +160,8 @@ def load_config(config_path: Optional[Path] = None) -> Config:
             mpv_ipc_port=pb.get("mpv_ipc_port", 9876),
             osd_duration=pb.get("osd_duration", 2.0),
             default_channel=pb.get("default_channel", 2),
+            screen=pb.get("screen", -1),
+            overscan=pb.get("overscan", 0.0),
         )
 
     # Parse web settings
@@ -245,6 +249,8 @@ def save_config(config: Config, config_path: Optional[Path] = None) -> None:
             "mpv_ipc_port": config.playback.mpv_ipc_port,
             "osd_duration": config.playback.osd_duration,
             "default_channel": config.playback.default_channel,
+            "screen": config.playback.screen,
+            "overscan": config.playback.overscan,
         },
         "web": {
             "host": config.web.host,

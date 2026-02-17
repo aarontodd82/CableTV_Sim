@@ -73,9 +73,30 @@ class MpvController:
         # Add fullscreen or fixed window size
         if fullscreen:
             cmd.append("--fullscreen")
+            # Target a specific display if configured
+            screen = self.config.playback.screen
+            if screen >= 0:
+                cmd.append(f"--screen={screen}")
+                cmd.append(f"--fs-screen={screen}")
         else:
             cmd.append("--geometry=640x480")
             cmd.append("--autofit-smaller=640x480")
+
+        # OSD base margin — keep text away from edges
+        osd_x = 20
+        osd_y = 15
+
+        # Overscan compensation — shrink video and OSD to stay visible on CRT
+        overscan = self.config.playback.overscan
+        if overscan > 0:
+            margin = overscan / 100.0
+            for side in ("left", "right", "top", "bottom"):
+                cmd.append(f"--video-margin-ratio-{side}={margin:.3f}")
+            osd_x += int(margin * 1024)
+            osd_y += int(margin * 768)
+
+        cmd.append(f"--osd-margin-x={osd_x}")
+        cmd.append(f"--osd-margin-y={osd_y}")
 
         # Add platform-specific options
         if display_config.get("video_output"):

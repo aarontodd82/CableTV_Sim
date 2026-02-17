@@ -1,5 +1,6 @@
 """Playback engine for channel switching and content playback."""
 
+import re
 import threading
 import time
 from datetime import datetime, timedelta
@@ -34,6 +35,7 @@ class PlaybackEngine:
         self._on_channel_change: Optional[Callable[[int], None]] = None
         self._on_content_change: Optional[Callable[[NowPlaying], None]] = None
         self._guide_generator: Optional["GuideGenerator"] = None
+        self._guide_current_file: Optional[Path] = None
 
     def set_guide_generator(self, generator: "GuideGenerator") -> None:
         """Set the guide generator for TV Guide channel playback."""
@@ -73,7 +75,7 @@ class PlaybackEngine:
 
         return True
 
-    def tune_to(self, channel_number: int) -> bool:
+    def tune_to(self, channel_number: int, user_initiated: bool = True) -> bool:
         """
         Tune to a specific channel.
 
@@ -157,7 +159,11 @@ class PlaybackEngine:
                 print(f"Failed to play {file_path}")
                 return False
 
-            if now_playing and now_playing.entry.content_type == "music":
+            if now_playing and now_playing.is_commercial:
+                # Commercials: only show OSD on user-initiated channel changes
+                if user_initiated:
+                    self._show_channel_osd(channel_number)
+            elif now_playing and now_playing.entry.content_type == "music":
                 # Music videos: show artist/title/year instead of channel OSD
                 self._show_music_osd(now_playing)
                 # Schedule end-of-video OSD
@@ -169,7 +175,7 @@ class PlaybackEngine:
                     self._music_end_timer.daemon = True
                     self._music_end_timer.start()
             else:
-                self._show_channel_osd(channel_number)
+                self._show_channel_osd(channel_number, now_playing)
 
         # Phase 3: Schedule next transition timer (lock held)
         with self._lock:
@@ -183,13 +189,23 @@ class PlaybackEngine:
 
         return True
 
-    def _show_channel_osd(self, channel_number: int) -> None:
-        """Show channel number and name on OSD."""
+    def _show_channel_osd(self, channel_number: int,
+                          now_playing: Optional[NowPlaying] = None) -> None:
+        """Show channel number, name, and current program title on OSD."""
         channel_config = self.config.channel_map.get(channel_number)
         if channel_config:
             message = f"{channel_number}\n{channel_config.name}"
         else:
             message = str(channel_number)
+
+        # Add clean program title (strip year from movies, S##E## from shows)
+        if now_playing and not now_playing.is_commercial:
+            title = now_playing.entry.title
+            # "The Shining (1980)" → "The Shining"
+            title = re.sub(r"\s*\(\d{4}\)$", "", title)
+            # "Friends S03E10" → "Friends"
+            title = re.sub(r"\s+S\d{2}E\d{2}$", "", title)
+            message += f"\n{title}"
 
         duration_ms = int(self.config.playback.osd_duration * 1000)
         self.mpv.show_osd_message(message, duration_ms)
@@ -256,6 +272,7 @@ class PlaybackEngine:
 
         Plays the pre-rendered guide segment, seeking to the correct
         position so it feels like a live always-running channel.
+        Starts a polling timer that checks every 5 seconds for new segments.
         """
         with self._lock:
             # Cancel any pending timers
@@ -276,9 +293,9 @@ class PlaybackEngine:
             self.mpv.stop()
             self.mpv.show_osd_message(f"{channel_number}\n{name}\nLoading...", 5000)
 
-            # Schedule a retry in 3 seconds
+            # Poll until ready
             with self._lock:
-                self._timer = threading.Timer(3.0, self._retry_guide_tune)
+                self._timer = threading.Timer(3.0, self._guide_poll)
                 self._timer.daemon = True
                 self._timer.start()
             return True
@@ -286,7 +303,11 @@ class PlaybackEngine:
         segment_info = self._guide_generator.get_current_segment()
         if not segment_info:
             self.mpv.show_osd_message(f"{channel_number}\nTV Guide\nLoading...", 5000)
-            return False
+            with self._lock:
+                self._timer = threading.Timer(3.0, self._guide_poll)
+                self._timer.daemon = True
+                self._timer.start()
+            return True
 
         file_path, generation_time, segment_duration = segment_info
 
@@ -295,8 +316,7 @@ class PlaybackEngine:
         elapsed = (now - generation_time).total_seconds()
         seek = elapsed % segment_duration if segment_duration > 0 else 0
 
-        # Play the segment file, looping so it never stops if the
-        # re-tune timer is slightly late or the file is shorter than expected
+        # Play the segment file, looping so it never stops between polls
         self.mpv._set_property("loop-file", "inf")
         success = self.mpv.play_file(str(file_path), seek_seconds=seek)
         if not success:
@@ -306,13 +326,14 @@ class PlaybackEngine:
 
         self._show_channel_osd(channel_number)
 
-        # Schedule re-tune when segment ends (to pick up new segment)
-        remaining = segment_duration - seek
-        if remaining > 0:
-            with self._lock:
-                self._timer = threading.Timer(remaining + 0.5, self._on_guide_segment_end)
-                self._timer.daemon = True
-                self._timer.start()
+        # Remember which file we're playing so the poll can detect changes
+        self._guide_current_file = file_path
+
+        # Start polling for segment changes every 5 seconds
+        with self._lock:
+            self._timer = threading.Timer(5.0, self._guide_poll)
+            self._timer.daemon = True
+            self._timer.start()
 
         # Fire channel change callback
         if self._on_channel_change:
@@ -320,31 +341,62 @@ class PlaybackEngine:
 
         return True
 
-    def _retry_guide_tune(self) -> None:
-        """Retry tuning to guide channel if it wasn't ready."""
+    def _guide_poll(self) -> None:
+        """Poll for guide segment changes. Runs every 5 seconds while on guide channel."""
         with self._lock:
             channel = self._current_channel
             self._timer = None
 
         guide_ch = self.config.guide.channel_number
-        if channel == guide_ch:
-            try:
-                self._tune_to_guide(guide_ch)
-            except Exception as e:
-                print(f"Guide retry error: {e}")
+        if channel != guide_ch:
+            return  # User switched away, stop polling
 
-    def _on_guide_segment_end(self) -> None:
-        """Re-tune to guide channel when segment ends to pick up new segment."""
-        with self._lock:
-            channel = self._current_channel
-            self._timer = None
+        try:
+            if not self._guide_generator or not self._guide_generator.is_ready:
+                # Not ready yet — keep polling
+                with self._lock:
+                    self._timer = threading.Timer(3.0, self._guide_poll)
+                    self._timer.daemon = True
+                    self._timer.start()
+                return
 
-        guide_ch = self.config.guide.channel_number
-        if channel == guide_ch:
-            try:
-                self._tune_to_guide(guide_ch)
-            except Exception as e:
-                print(f"Guide segment transition error: {e}")
+            segment_info = self._guide_generator.get_current_segment()
+            if not segment_info:
+                with self._lock:
+                    self._timer = threading.Timer(3.0, self._guide_poll)
+                    self._timer.daemon = True
+                    self._timer.start()
+                return
+
+            file_path, generation_time, segment_duration = segment_info
+            old_file = getattr(self, '_guide_current_file', None)
+
+            if old_file is None or file_path != old_file:
+                # Segment changed — switch to the new one
+                print(f"  Guide: switching to new segment")
+                now = datetime.now()
+                elapsed = (now - generation_time).total_seconds()
+                seek = elapsed % segment_duration if segment_duration > 0 else 0
+
+                self.mpv._set_property("loop-file", "inf")
+                self.mpv.play_file(str(file_path), seek_seconds=seek)
+                self._guide_current_file = file_path
+
+            # Keep polling
+            with self._lock:
+                if self._current_channel == guide_ch:
+                    self._timer = threading.Timer(5.0, self._guide_poll)
+                    self._timer.daemon = True
+                    self._timer.start()
+
+        except Exception as e:
+            print(f"Guide poll error: {e}")
+            # Keep polling even after errors
+            with self._lock:
+                if self._current_channel == guide_ch:
+                    self._timer = threading.Timer(5.0, self._guide_poll)
+                    self._timer.daemon = True
+                    self._timer.start()
 
     def _schedule_next_content(self) -> None:
         """
@@ -375,10 +427,10 @@ class PlaybackEngine:
                 channel = self._current_channel
                 self._timer = None
 
-        # Tune outside the lock to avoid deadlock
+        # Tune outside the lock to avoid deadlock (not user-initiated)
         if channel:
             try:
-                self.tune_to(channel)
+                self.tune_to(channel, user_initiated=False)
             except Exception as e:
                 print(f"Error during content transition: {e}")
 

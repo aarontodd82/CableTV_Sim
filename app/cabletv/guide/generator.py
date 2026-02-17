@@ -16,16 +16,31 @@ from .renderer import GuideGridRenderer, ROW_HEIGHT, TIME_HEADER_HEIGHT
 from .promos import select_promo_content, generate_promo_video
 
 
+# Segment duration aligns to this many minutes
+WINDOW_MINUTES = 10
+
+
+def _get_window_start(dt: datetime) -> datetime:
+    """Round down to nearest WINDOW_MINUTES boundary."""
+    return dt.replace(minute=(dt.minute // WINDOW_MINUTES) * WINDOW_MINUTES,
+                      second=0, microsecond=0)
+
+
+def _get_next_window_start(dt: datetime) -> datetime:
+    """Get the start of the next WINDOW_MINUTES window."""
+    return _get_window_start(dt) + timedelta(minutes=WINDOW_MINUTES)
+
+
 class GuideGenerator:
     """
     Background generator for TV Guide channel video segments.
 
     Generates pre-rendered video files combining:
-    - Top half (640x288): Promo clips alternating with branded title cards
-    - Bottom half (640x192): Scrolling Prevue-style channel grid
+    - Top half: Promo clips alternating with branded title cards
+    - Bottom half: Scrolling Prevue-style channel grid
 
-    The generator runs in a background thread, producing segments
-    periodically. The playback engine just plays the current segment file.
+    Segments are aligned to 10-minute boundaries so that baked-in
+    clocks (title cards, grid header) show the correct time.
     """
 
     def __init__(self, config: Config, schedule_engine: ScheduleEngine):
@@ -43,6 +58,11 @@ class GuideGenerator:
         self._generation_time: Optional[datetime] = None
         self._segment_duration: float = 0
 
+        # Pending segment (generated but not yet live)
+        self._pending_segment: Optional[Path] = None
+        self._pending_time: Optional[datetime] = None
+        self._pending_duration: float = 0
+
         # A/B alternation — never overwrite the file mpv is playing
         self._next_slot = "a"  # Which filename to write next
 
@@ -54,6 +74,7 @@ class GuideGenerator:
     @property
     def is_ready(self) -> bool:
         """Check if a segment is available for playback."""
+        self._try_swap_pending()
         with self._lock:
             return (
                 self._current_segment is not None
@@ -72,6 +93,7 @@ class GuideGenerator:
             Tuple of (file_path, generation_time, segment_duration)
             or None if not ready
         """
+        self._try_swap_pending()
         with self._lock:
             if self._current_segment and self._current_segment.exists():
                 return (
@@ -80,6 +102,33 @@ class GuideGenerator:
                     self._segment_duration,
                 )
             return None
+
+    def get_pending_swap_time(self) -> Optional[datetime]:
+        """Get the time when the pending segment will become active, or None."""
+        with self._lock:
+            return self._pending_time
+
+    def _try_swap_pending(self) -> None:
+        """Swap pending segment into current if its target time has arrived."""
+        with self._lock:
+            if (self._pending_segment
+                    and self._pending_time
+                    and datetime.now() >= self._pending_time):
+                old = self._current_segment
+                self._current_segment = self._pending_segment
+                self._generation_time = self._pending_time
+                self._segment_duration = self._pending_duration
+                self._pending_segment = None
+                self._pending_time = None
+                self._pending_duration = 0
+                self._ready_event.set()
+
+                # Clean up old segment file
+                if old and old != self._current_segment and old.exists():
+                    try:
+                        old.unlink()
+                    except OSError:
+                        pass
 
     def start(self) -> None:
         """Start the background generation thread."""
@@ -106,46 +155,57 @@ class GuideGenerator:
     def _generation_loop(self) -> None:
         """Main generation loop running in background thread.
 
-        Timing strategy: after each generation completes, calculate how
-        much playback time remains in the current segment and sleep for
-        half of that. This ensures the next segment is ready well before
-        the current one runs out, regardless of how long generation takes.
+        Timing strategy: segments are aligned to 10-minute boundaries.
+        First segment targets the current window (swap immediately).
+        Subsequent segments target the next window (swap when it arrives).
         """
         try:
-            # First: generate a short segment for fast startup
-            print("  Guide: generating initial short segment...")
-            self._generate_segment(short=True)
+            # First: generate a short segment for the current 10-min window
+            # This goes live immediately so the channel isn't empty on startup
+            current_window = _get_window_start(datetime.now())
+            print(f"  Guide: generating initial segment for {current_window.strftime('%I:%M %p')}...")
+            self._generate_segment(short=True, target_time=current_window,
+                                   swap_immediately=True, show_clock=False)
 
-            # Then continuously regenerate full segments
+            # Then continuously generate full segments for future windows
             while not self._stop_event.is_set():
-                print("  Guide: generating full segment...")
-                gen_start = _time.monotonic()
-                self._generate_segment(short=False)
-                gen_elapsed = _time.monotonic() - gen_start
+                next_window = _get_next_window_start(datetime.now())
+                print(f"  Guide: generating segment for {next_window.strftime('%I:%M %p')}...")
+                self._generate_segment(short=False, target_time=next_window,
+                                       swap_immediately=False)
 
-                # Wait until roughly halfway through the new segment's
-                # playback before starting the next generation cycle.
-                # This gives plenty of buffer for the next generation.
-                remaining_playback = max(0, self._segment_duration - gen_elapsed)
-                wait_time = max(30, remaining_playback * 0.5)
+                # Wait until the target time arrives, then start the next cycle
+                now = datetime.now()
+                wait_secs = (next_window - now).total_seconds()
+                if wait_secs > 0:
+                    self._stop_event.wait(timeout=wait_secs)
 
-                self._stop_event.wait(timeout=wait_time)
+                # Swap the pending segment now that target time has arrived
+                self._try_swap_pending()
 
         except Exception as e:
             print(f"  Guide generator error: {e}")
             import traceback
             traceback.print_exc()
 
-    def _generate_segment(self, short: bool = False) -> bool:
+    def _generate_segment(
+        self,
+        short: bool = False,
+        target_time: Optional[datetime] = None,
+        swap_immediately: bool = True,
+        show_clock: bool = True,
+    ) -> bool:
         """
         Generate a single guide segment through the 3-phase pipeline.
 
-        Phase 1: Generate promo video (top 640x288)
-        Phase 2: Generate grid video (bottom 640x192)
-        Phase 3: Composite into final 640x480 segment with audio
-
         Args:
             short: If True, generate a shorter segment (~2 min) for fast startup
+            target_time: The time this segment represents (for baked-in clocks).
+                         If None, uses datetime.now().
+            swap_immediately: If True, make segment current right away.
+                              If False, store as pending until target_time arrives.
+            show_clock: If False, show "--:--" placeholders instead of times
+                        (used for initial segment where time won't be accurate)
 
         Returns:
             True if successful
@@ -153,7 +213,12 @@ class GuideGenerator:
         gc = self.guide_config
         duration = 120 if short else gc.segment_duration
         fps = gc.fps
-        generation_time = datetime.now()
+
+        if target_time is None:
+            target_time = datetime.now()
+
+        # For no-clock mode, pass None as display times so renderers show "--:--"
+        display_time = target_time if show_clock else None
 
         work_dir = Path(tempfile.mkdtemp(prefix="guide_"))
 
@@ -163,18 +228,20 @@ class GuideGenerator:
             print("    Phase 1: Selecting promo content...")
             promos = select_promo_content(self.schedule, gc)
             print(f"    Phase 1: Generating promo video ({len(promos)} promos)...")
-            if not generate_promo_video(promos, promo_path, duration, gc, work_dir):
+            if not generate_promo_video(promos, promo_path, duration, gc, work_dir,
+                                        segment_start_time=display_time):
                 print("    Warning: Promo video generation failed, using fallback")
-                # Generate a plain title card as fallback
                 from .promos import generate_music_gap
-                if not generate_music_gap(promo_path, duration, gc):
+                if not generate_music_gap(promo_path, duration, gc,
+                                          display_time=display_time):
                     print("    Error: Fallback also failed")
                     return False
 
             # Phase 2: Grid video (bottom half)
             grid_path = work_dir / "grid.mp4"
             print("    Phase 2: Generating scrolling grid video...")
-            if not self._generate_grid_video(grid_path, duration, fps, generation_time):
+            if not self._generate_grid_video(grid_path, duration, fps, target_time,
+                                             show_clock=show_clock):
                 print("    Error: Grid video generation failed")
                 return False
 
@@ -185,38 +252,36 @@ class GuideGenerator:
                 print("    Error: Composite failed")
                 return False
 
-            # A/B swap: write to the INACTIVE slot so mpv's current
-            # file is never touched.  On the next tune/re-tune the
-            # playback engine will pick up the new file.
+            # A/B swap: write to the INACTIVE slot
             slot = self._next_slot
             output_path = self._output_dir / f"segment_{slot}.mp4"
-
-            # Copy to output (can't rename across drives/filesystems)
             shutil.copy2(str(final_path), str(output_path))
 
-            old_segment = None
             with self._lock:
-                old_segment = self._current_segment
-                self._current_segment = output_path
-                self._generation_time = generation_time
-                self._segment_duration = duration
-                # Alternate for next time
+                if swap_immediately:
+                    old = self._current_segment
+                    self._current_segment = output_path
+                    self._generation_time = target_time
+                    self._segment_duration = duration
+                    self._ready_event.set()
+                else:
+                    old = None
+                    self._pending_segment = output_path
+                    self._pending_time = target_time
+                    self._pending_duration = duration
+
                 self._next_slot = "b" if slot == "a" else "a"
 
-            self._ready_event.set()
-
-            # Clean up previous segment file (the one mpv is NOT playing
-            # anymore after the pointer swap).  On Windows the delete may
-            # fail if mpv still has the handle open; that's fine — it'll
-            # be overwritten next cycle anyway.
-            if old_segment and old_segment != output_path and old_segment.exists():
+            # Clean up old segment
+            if old and old != output_path and old.exists():
                 try:
-                    old_segment.unlink()
+                    old.unlink()
                 except OSError:
-                    pass  # File still in use — will be cleaned up next cycle
+                    pass
 
             seg_type = "short" if short else "full"
-            print(f"    Guide segment ready ({seg_type}, {duration}s)")
+            target_str = target_time.strftime("%I:%M %p").lstrip("0")
+            print(f"    Guide segment ready ({seg_type}, {duration}s, target {target_str})")
             return True
 
         except Exception as e:
@@ -225,7 +290,6 @@ class GuideGenerator:
             traceback.print_exc()
             return False
         finally:
-            # Clean up work directory
             try:
                 shutil.rmtree(work_dir, ignore_errors=True)
             except OSError:
@@ -236,7 +300,8 @@ class GuideGenerator:
         output_path: Path,
         duration: float,
         fps: int,
-        generation_time: datetime,
+        target_time: datetime,
+        show_clock: bool = True,
     ) -> bool:
         """
         Generate the scrolling grid video by piping Pillow frames to FFmpeg.
@@ -263,11 +328,11 @@ class GuideGenerator:
                 label = "Music Videos" if "music" in ch.content_types else ch.name
                 guide_data[ch.number] = [ScheduleEntry(
                     content_id=0, title=label, content_type="music",
-                    start_time=generation_time,
-                    end_time=generation_time + timedelta(hours=3),
+                    start_time=target_time,
+                    end_time=target_time + timedelta(hours=3),
                     duration_seconds=10800, file_path="",
                     channel_number=ch.number,
-                    slot_end_time=generation_time + timedelta(hours=3),
+                    slot_end_time=target_time + timedelta(hours=3),
                 )]
             else:
                 regular_channels.append(ch.number)
@@ -275,7 +340,7 @@ class GuideGenerator:
         # Get full schedule data for regular channels
         if regular_channels:
             schedule_data = self.schedule.get_guide_data(
-                start_time=generation_time,
+                start_time=target_time,
                 hours=2,
                 channels=regular_channels,
             )
@@ -287,7 +352,7 @@ class GuideGenerator:
         # Render the full strip (done once) — 1.5 hours = 3 time slots
         strip = renderer.render_full_strip(
             guide_data=guide_data,
-            start_time=generation_time,
+            start_time=target_time,
             hours=1.5,
             channel_configs=channel_configs,
             guide_channel=gc.channel_number,
@@ -327,6 +392,10 @@ class GuideGenerator:
                 stderr=subprocess.DEVNULL,
             )
 
+            last_minute = -1
+            frame_time = None
+            placeholder = "--:-- --" if not show_clock else None
+
             for frame_num in range(total_frames):
                 if self._stop_event.is_set():
                     proc.kill()
@@ -335,7 +404,18 @@ class GuideGenerator:
                 t = frame_num / fps
                 scroll_offset = t * scroll_px_per_sec
 
-                frame = renderer.get_frame_at_offset(strip, scroll_offset)
+                if show_clock:
+                    # Update clock time only when the minute changes
+                    current_minute = int(t) // 60
+                    if current_minute != last_minute:
+                        frame_time = target_time + timedelta(seconds=t)
+                        last_minute = current_minute
+
+                frame = renderer.get_frame_at_offset(
+                    strip, scroll_offset,
+                    current_time=frame_time,
+                    clock_text=placeholder,
+                )
                 raw = frame.tobytes()
                 proc.stdin.write(raw)
 
@@ -368,22 +448,17 @@ class GuideGenerator:
         has_bg_music = bool(bg_music) and Path(bg_music).exists()
 
         if has_bg_music:
-            # Complex audio: mix background music with promo audio
-            # Background music loops, volume ducks during promo audio
             cmd = [
                 ffmpeg,
-                "-i", str(promo_path),       # input 0: promo video + audio
-                "-i", str(grid_path),         # input 1: grid video (no audio)
+                "-i", str(promo_path),
+                "-i", str(grid_path),
                 "-stream_loop", "-1",
-                "-i", bg_music,               # input 2: background music (loops)
+                "-i", bg_music,
                 "-filter_complex",
                 (
-                    # Stack videos vertically
                     f"[0:v]scale={gc.width}:{gc.promo_height}[top];"
                     f"[1:v]scale={gc.width}:{gc.grid_height}[bottom];"
                     "[top][bottom]vstack=inputs=2[v];"
-                    # Audio: mix promo audio with background music
-                    # Duck bg music volume when promo audio is present
                     "[0:a]volume=1.0[promo_a];"
                     f"[2:a]atrim=0:{duration},volume=0.4[bg_a];"
                     "[promo_a][bg_a]amix=inputs=2:duration=longest:dropout_transition=2[a]"
@@ -400,11 +475,10 @@ class GuideGenerator:
                 str(output_path),
             ]
         else:
-            # Simple: just stack videos, use promo audio
             cmd = [
                 ffmpeg,
-                "-i", str(promo_path),       # input 0: promo video + audio
-                "-i", str(grid_path),         # input 1: grid video (no audio)
+                "-i", str(promo_path),
+                "-i", str(grid_path),
                 "-filter_complex",
                 (
                     f"[0:v]scale={gc.width}:{gc.promo_height}[top];"
@@ -412,7 +486,7 @@ class GuideGenerator:
                     "[top][bottom]vstack=inputs=2[v]"
                 ),
                 "-map", "[v]",
-                "-map", "0:a?",  # Use promo audio if present
+                "-map", "0:a?",
                 "-t", str(duration),
                 "-c:v", "libx264",
                 "-preset", "fast",
@@ -447,4 +521,6 @@ class GuideGenerator:
         Returns:
             True if successful
         """
-        return self._generate_segment(short=short)
+        target = _get_window_start(datetime.now())
+        return self._generate_segment(short=short, target_time=target,
+                                      swap_immediately=True)

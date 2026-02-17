@@ -260,6 +260,7 @@ def generate_music_gap(
     output_path: Path,
     duration: float,
     guide_config: GuideConfig,
+    display_time: Optional[datetime] = None,
 ) -> bool:
     """
     Generate a branded title card video for gaps between promos.
@@ -271,6 +272,7 @@ def generate_music_gap(
         output_path: Where to write the output
         duration: Duration in seconds
         guide_config: Guide configuration
+        display_time: Time to show on the card (defaults to now)
 
     Returns:
         True if successful
@@ -292,20 +294,24 @@ def generate_music_gap(
         "PREVIEW CHANNEL", fill=(255, 255, 100), font=title_font, anchor="mm"
     )
 
-    # Current time
-    now = datetime.now()
-    time_str = now.strftime("%I:%M %p").lstrip("0")
+    if display_time is not None:
+        # Display time
+        time_str = display_time.strftime("%I:%M %p").lstrip("0")
+        date_str = display_time.strftime("%A, %B %d").lstrip("0")
+    else:
+        time_str = "--:-- --"
+        date_str = ""
+
     draw.text(
         (width // 2, height // 2 + 5),
         time_str, fill=(255, 255, 255), font=time_font, anchor="mm"
     )
 
-    # Date
-    date_str = now.strftime("%A, %B %d").lstrip("0")
-    draw.text(
-        (width // 2, height // 2 + 30),
-        date_str, fill=(180, 180, 180), font=sub_font, anchor="mm"
-    )
+    if date_str:
+        draw.text(
+            (width // 2, height // 2 + 30),
+            date_str, fill=(180, 180, 180), font=sub_font, anchor="mm"
+        )
 
     # Save frame as temporary PNG, then use FFmpeg to make video
     ffmpeg = get_ffmpeg_path()
@@ -350,6 +356,7 @@ def generate_promo_video(
     duration: float,
     guide_config: GuideConfig,
     work_dir: Path,
+    segment_start_time: Optional[datetime] = None,
 ) -> bool:
     """
     Generate the complete promo video for the top half.
@@ -363,6 +370,7 @@ def generate_promo_video(
         duration: Total duration needed
         guide_config: Guide configuration
         work_dir: Temporary working directory for intermediate files
+        segment_start_time: Target playback start time for baking in clocks
 
     Returns:
         True if successful
@@ -373,7 +381,8 @@ def generate_promo_video(
 
     if not promos:
         # No promos available — generate full-duration title card
-        return generate_music_gap(output_path, duration, guide_config)
+        return generate_music_gap(output_path, duration, guide_config,
+                                  display_time=segment_start_time)
 
     # Generate individual clips
     clip_files = []
@@ -383,6 +392,11 @@ def generate_promo_video(
 
     while accumulated < duration:
         remaining = duration - accumulated
+        # Time this clip will appear when played back
+        if segment_start_time is not None:
+            gap_time = segment_start_time + timedelta(seconds=accumulated)
+        else:
+            gap_time = None  # No clock — show "--:--" placeholders
 
         if clip_idx % 2 == 0:
             # Promo clip
@@ -400,7 +414,8 @@ def generate_promo_video(
                     # Failed — use a gap instead
                     clip_dur = min(gap_duration, remaining)
                     clip_path = work_dir / f"gap_{clip_idx:03d}.mp4"
-                    if generate_music_gap(clip_path, clip_dur, guide_config):
+                    if generate_music_gap(clip_path, clip_dur, guide_config,
+                                          display_time=gap_time):
                         clip_files.append(str(clip_path))
                         accumulated += clip_dur
                     else:
@@ -410,7 +425,8 @@ def generate_promo_video(
                 promo_idx = 0
                 clip_dur = min(gap_duration, remaining)
                 clip_path = work_dir / f"gap_{clip_idx:03d}.mp4"
-                if generate_music_gap(clip_path, clip_dur, guide_config):
+                if generate_music_gap(clip_path, clip_dur, guide_config,
+                                      display_time=gap_time):
                     clip_files.append(str(clip_path))
                     accumulated += clip_dur
                 else:
@@ -419,7 +435,8 @@ def generate_promo_video(
             # Music gap
             clip_dur = min(gap_duration, remaining)
             clip_path = work_dir / f"gap_{clip_idx:03d}.mp4"
-            if generate_music_gap(clip_path, clip_dur, guide_config):
+            if generate_music_gap(clip_path, clip_dur, guide_config,
+                                  display_time=gap_time):
                 clip_files.append(str(clip_path))
                 accumulated += clip_dur
             else:
@@ -428,7 +445,8 @@ def generate_promo_video(
         clip_idx += 1
 
     if not clip_files:
-        return generate_music_gap(output_path, duration, guide_config)
+        return generate_music_gap(output_path, duration, guide_config,
+                                  display_time=segment_start_time)
 
     if len(clip_files) == 1:
         # Just one clip — rename it

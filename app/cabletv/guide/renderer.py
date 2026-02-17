@@ -340,7 +340,9 @@ class GuideGridRenderer:
                 )
 
     def get_frame_at_offset(
-        self, strip: Image.Image, scroll_offset: float
+        self, strip: Image.Image, scroll_offset: float,
+        current_time: Optional[datetime] = None,
+        clock_text: Optional[str] = None,
     ) -> Image.Image:
         """
         Get a viewport frame from the strip at the given scroll offset.
@@ -351,6 +353,8 @@ class GuideGridRenderer:
         Args:
             strip: The full tall strip image
             scroll_offset: Pixel offset into the channel rows (wraps)
+            current_time: If provided, updates the clock in the header
+            clock_text: If provided, overrides clock with this literal string
 
         Returns:
             640 x grid_height frame
@@ -360,6 +364,17 @@ class GuideGridRenderer:
         # Pin the time header at the top
         header = strip.crop((0, 0, self.grid_width, TIME_HEADER_HEIGHT))
         viewport.paste(header, (0, 0))
+
+        # Update the clock display in the header
+        if clock_text is not None or current_time is not None:
+            draw = ImageDraw.Draw(viewport)
+            # Clear the clock area (channel column portion of header)
+            draw.rectangle([0, 0, CHANNEL_COL_WIDTH - 2, TIME_HEADER_HEIGHT - 2], fill=HEADER_BG)
+            if clock_text is not None:
+                text = clock_text
+            else:
+                text = current_time.strftime("%I:%M %p").lstrip("0")
+            draw.text((8, 5), text, fill=CHANNEL_NUM_COLOR, font=self._font_header)
 
         # Scrollable area below header
         scroll_area_height = self.grid_height - TIME_HEADER_HEIGHT
