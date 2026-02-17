@@ -1,7 +1,7 @@
 """Schedule engine for deterministic content scheduling."""
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -336,6 +336,12 @@ class ScheduleEngine:
         rng = random.Random(self._get_channel_seed(channel_config.number, slot_number))
         return rng.choice(available)
 
+    # Anchor size for walk-forward alignment. All target_slots in the same
+    # anchor block start their walk from the same point, guaranteeing that
+    # content assignments cascade identically regardless of which slot in the
+    # block is queried. Must be larger than any content's slot span (~8 max).
+    _ANCHOR_SIZE = 200
+
     def _find_block_start(
         self,
         channel_config: ChannelConfig,
@@ -345,9 +351,10 @@ class ScheduleEngine:
         """
         Find the starting slot of the content block containing target_slot.
 
-        Walks FORWARD from well before target_slot, assigning content to slots
-        and skipping slots that are occupied by multi-slot content. This
-        correctly handles movies/shows that span multiple 30-minute slots.
+        Walks FORWARD from a fixed anchor point, assigning content to slots
+        and skipping slots that are occupied by multi-slot content. The anchor
+        is aligned so that nearby target_slots always walk from the same
+        starting point, producing consistent content assignments.
 
         Args:
             channel_config: Channel config
@@ -357,8 +364,10 @@ class ScheduleEngine:
         Returns:
             Tuple of (start_slot, content_dict)
         """
-        # Walk forward from far enough back to catch any long content
-        search_start = max(0, target_slot - 100)
+        # Align walk start to a fixed anchor so nearby slots cascade identically.
+        # Overlap by 10 slots to catch multi-slot content crossing the anchor boundary.
+        anchor = (target_slot // self._ANCHOR_SIZE) * self._ANCHOR_SIZE
+        search_start = max(0, anchor - 10)
 
         current_slot = search_start
         while current_slot <= target_slot:
@@ -704,14 +713,23 @@ class ScheduleEngine:
             while current_time < end_time:
                 now_playing = self.what_is_on(channel_num, current_time)
                 if now_playing:
-                    # Only add entry if not already added (avoid duplicates)
                     if not entries or entries[-1].content_id != now_playing.entry.content_id:
-                        entries.append(now_playing.entry)
-                    # Move to the end of this slot block (includes commercial time)
-                    current_time = now_playing.entry.slot_end_time
+                        # Content changed — clip previous entry's end time
+                        if entries and entries[-1].slot_end_time > current_time:
+                            entries[-1].slot_end_time = current_time
+                        # Clip start_time: when exclusions change mid-block, the
+                        # block-start from what_is_on may precede the actual
+                        # switch point.  Use the time we discovered the change.
+                        entry = now_playing.entry
+                        if entry.start_time < current_time:
+                            entry = replace(entry, start_time=current_time)
+                        entries.append(entry)
                 else:
-                    # No content, skip a slot
-                    current_time += timedelta(minutes=self.slot_duration)
+                    # No content — clip previous entry if needed
+                    if entries and entries[-1].slot_end_time > current_time:
+                        entries[-1].slot_end_time = current_time
+                # Walk slot-by-slot to catch exclusion changes at boundaries
+                current_time += timedelta(minutes=self.slot_duration)
 
             guide[channel_num] = entries
 
