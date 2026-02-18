@@ -425,6 +425,74 @@ guide:
 python -m cabletv guide generate [--short]    # Generate guide segments manually
 ```
 
+## Weather Channel (Ch26 — The Weather Channel)
+
+90s-style Weather Channel with cycling data pages, scrolling forecast ticker, and optional smooth jazz background music.
+
+### Architecture
+
+```
+app/cabletv/weather/
+├── __init__.py       → Package docstring
+├── api.py            → Open-Meteo + RainViewer fetching, data models, caching
+├── renderer.py       → 6-page Pillow renderer + scrolling ticker + brand bar
+├── generator.py      → Background segment generation (mirrors guide/generator.py)
+├── icons.py          → Programmatic weather icons drawn with Pillow
+└── moon.py           → Pure-Python moon phase calculation
+```
+
+### How It Works
+
+- `weather/generator.py` runs in background, pre-rendering video segments
+- `weather/renderer.py` draws 6 cycling pages using Pillow (current conditions, forecast, almanac, etc.)
+- `weather/api.py` fetches data from Open-Meteo API (no API key needed), caches for `refresh_interval`
+- Segments are pre-rendered to `weather/` directory and played by mpv with loop
+- Playback engine polls every 5 seconds for new segments (same pattern as guide)
+- Weather data refreshes every `refresh_interval` seconds (default 1 hour)
+
+### 6 Pages (10 seconds each)
+
+1. **Current Conditions** — Large temp, icon, conditions text, humidity/wind/barometer/dewpoint/visibility/feels-like
+2. **Today's Forecast** — Today high/conditions + Tonight low/conditions + Tomorrow preview
+3. **Extended Forecast** — 5-day horizontal grid with icons and high/low temps
+4. **Almanac** — Sunrise/sunset, day length, moon phase with drawn moon circle
+5. **Hourly Forecast** — 12-row table with time, temp, icon, precip% (alternating rows)
+6. **Regional Radar** — RainViewer radar with retro green-on-black colormap, OR **Regional Temperatures** fallback
+
+### APIs
+
+- **Open-Meteo** (`api.open-meteo.com/v1/forecast`): Free, no API key. Single call gets current + hourly + daily + sunrise/sunset.
+- **RainViewer** (`api.rainviewer.com`): Free radar tiles. 3x3 tile grid at zoom 7, stitched and colormapped.
+
+### Config (config.yaml)
+
+```yaml
+- number: 26
+  name: "Weather Channel"
+  tags: []
+  content_types: []
+  commercial_ratio: 0.0
+
+weather:
+  enabled: true
+  channel_number: 26
+  latitude: 35.3965
+  longitude: -79.0028
+  location_name: "Lillington, NC"
+  segment_duration: 60
+  page_duration: 10
+  refresh_interval: 3600
+  fps: 15
+  radar_enabled: true
+  background_music: "L:\\CableTV_Sim\\music\\weather.mp3"
+```
+
+### CLI
+
+```bash
+python -m cabletv weather generate    # Generate a weather segment for testing
+```
+
 ## Implementation Status
 
 ### Complete
@@ -437,10 +505,11 @@ python -m cabletv guide generate [--short]    # Generate guide segments manually
 - Info bumpers (mini-guide OSD in every commercial break, 5-8s)
 - mpv playback with segment transitions (content, commercial, info bumper)
 - Web remote control
-- 25 channels configured (24 content + 1 guide; real cable names: MTV, Comedy Central, Sci-Fi Channel, HBO, Disney Channel, etc.)
+- 26 channels configured (24 content + 1 guide + 1 weather; real cable names: MTV, Comedy Central, Sci-Fi Channel, HBO, Disney Channel, etc.)
 - Content edit/reset CLI commands for fixing misidentifications
 - Music video channel (Ch25 — MTV) with continuous playlist, artist OSD, no commercials
 - Guide channel (Ch14 — Preview Channel) with Prevue-style scrolling grid + promo clips
+- Weather channel (Ch26 — The Weather Channel) with cycling data pages, scrolling ticker, radar
 - "Classic" bonus tag auto-assigned by AI for pre-1980s content
 - "Disney" bonus tag auto-assigned by AI for Disney/Pixar content
 

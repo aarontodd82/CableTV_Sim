@@ -68,6 +68,7 @@ class MpvController:
             "--keep-open=yes",
             "--osd-level=1",
             "--osd-duration=2000",
+            "--osd-font=VCR OSD Mono",
         ]
 
         # Add fullscreen or fixed window size

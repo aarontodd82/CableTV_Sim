@@ -79,6 +79,12 @@ channels:
     content_types: ["music"]
     commercial_ratio: 0.0
 
+  - number: 26
+    name: "Weather Channel"
+    tags: []
+    content_types: []
+    commercial_ratio: 0.0
+
   - number: 27
     name: "Discovery Channel"
     tags: ["documentary", "educational", "history"]
@@ -201,3 +207,24 @@ guide:
   fps: 15
   # Path to background music file (MP3/WAV), empty for no music
   background_music: "L:\\CableTV_Sim\\music\\preview.mp3"
+
+weather:
+  # Weather Channel (90s-style cycling weather data pages)
+  enabled: true
+  channel_number: 26
+  # Location coordinates (Lillington, NC)
+  latitude: 35.3965
+  longitude: -79.0028
+  location_name: "Lillington, NC"
+  # Duration of each generated segment in seconds
+  segment_duration: 60
+  # Duration of each weather page in seconds
+  page_duration: 10
+  # How often to refresh weather data from API (seconds)
+  refresh_interval: 3600
+  # Frames per second for weather video
+  fps: 15
+  # Enable RainViewer radar imagery
+  radar_enabled: true
+  # Path to smooth jazz background music (MP3/WAV), empty for no music
+  background_music: "L:\\CableTV_Sim\\music\\weather.mp3"

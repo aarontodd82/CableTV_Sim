@@ -180,6 +180,7 @@ def get_content_paths(root: Optional[Path] = None) -> dict[str, Path]:
         "commercials_originals": root / "commercials" / "originals",
         "commercials_normalized": root / "commercials" / "normalized",
         "guide_segments": root / "guide",
+        "weather_segments": root / "weather",
         "logs": root / "logs",
     }
 

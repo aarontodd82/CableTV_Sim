@@ -25,6 +25,7 @@ class CableTVSystem:
         self.schedule: Optional[ScheduleEngine] = None
         self.playback: Optional[PlaybackEngine] = None
         self.guide_generator = None
+        self.weather_generator = None
         self._web_thread: Optional[threading.Thread] = None
         self._shutdown_event = threading.Event()
 
@@ -59,6 +60,13 @@ class CableTVSystem:
             self.guide_generator = GuideGenerator(self.config, self.schedule)
             self.playback.set_guide_generator(self.guide_generator)
             print("  Guide generator ready")
+
+        # Create weather generator if enabled
+        if self.config.weather.enabled:
+            from .weather.generator import WeatherGenerator
+            self.weather_generator = WeatherGenerator(self.config)
+            self.playback.set_weather_generator(self.weather_generator)
+            print("  Weather generator ready")
 
         return True
 
@@ -132,6 +140,9 @@ class CableTVSystem:
         if self.guide_generator:
             self.guide_generator.stop()
 
+        if self.weather_generator:
+            self.weather_generator.stop()
+
         if self.playback:
             self.playback.shutdown()
             print("  Playback engine stopped")
@@ -172,6 +183,10 @@ class CableTVSystem:
             # Start guide generator
             if self.guide_generator:
                 self.guide_generator.start()
+
+            # Start weather generator
+            if self.weather_generator:
+                self.weather_generator.start()
 
             # Wait for shutdown
             self.wait_for_shutdown()

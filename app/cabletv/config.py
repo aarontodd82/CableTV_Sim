@@ -78,6 +78,25 @@ class GuideConfig:
 
 
 @dataclass
+class WeatherConfig:
+    """Weather Channel configuration."""
+    enabled: bool = True
+    channel_number: int = 26
+    latitude: float = 35.3965
+    longitude: float = -79.0028
+    location_name: str = "Lillington, NC"
+    segment_duration: int = 60  # Seconds per generated segment
+    page_duration: int = 10  # Seconds per weather page
+    refresh_interval: int = 3600  # Seconds between weather data refreshes
+    fps: int = 15
+    width: int = 640
+    height: int = 480
+    background_music: str = ""  # Path to smooth jazz MP3/WAV
+    radar_enabled: bool = True
+    units: str = "imperial"
+
+
+@dataclass
 class Config:
     """Main configuration container."""
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
@@ -86,6 +105,7 @@ class Config:
     playback: PlaybackConfig = field(default_factory=PlaybackConfig)
     web: WebConfig = field(default_factory=WebConfig)
     guide: GuideConfig = field(default_factory=GuideConfig)
+    weather: WeatherConfig = field(default_factory=WeatherConfig)
 
     @property
     def channel_map(self) -> dict[int, ChannelConfig]:
@@ -194,6 +214,26 @@ def load_config(config_path: Optional[Path] = None) -> Config:
             background_music=g.get("background_music", ""),
         )
 
+    # Parse weather settings
+    if "weather" in data:
+        w = data["weather"]
+        config.weather = WeatherConfig(
+            enabled=w.get("enabled", True),
+            channel_number=w.get("channel_number", 26),
+            latitude=w.get("latitude", 35.3965),
+            longitude=w.get("longitude", -79.0028),
+            location_name=w.get("location_name", "Lillington, NC"),
+            segment_duration=w.get("segment_duration", 60),
+            page_duration=w.get("page_duration", 10),
+            refresh_interval=w.get("refresh_interval", 3600),
+            fps=w.get("fps", 15),
+            width=w.get("width", 640),
+            height=w.get("height", 480),
+            background_music=w.get("background_music", ""),
+            radar_enabled=w.get("radar_enabled", True),
+            units=w.get("units", "imperial"),
+        )
+
     return config
 
 
@@ -273,6 +313,22 @@ def save_config(config: Config, config_path: Optional[Path] = None) -> None:
             "grid_height": config.guide.grid_height,
             "promo_height": config.guide.promo_height,
             "background_music": config.guide.background_music,
+        },
+        "weather": {
+            "enabled": config.weather.enabled,
+            "channel_number": config.weather.channel_number,
+            "latitude": config.weather.latitude,
+            "longitude": config.weather.longitude,
+            "location_name": config.weather.location_name,
+            "segment_duration": config.weather.segment_duration,
+            "page_duration": config.weather.page_duration,
+            "refresh_interval": config.weather.refresh_interval,
+            "fps": config.weather.fps,
+            "width": config.weather.width,
+            "height": config.weather.height,
+            "background_music": config.weather.background_music,
+            "radar_enabled": config.weather.radar_enabled,
+            "units": config.weather.units,
         },
     }
 

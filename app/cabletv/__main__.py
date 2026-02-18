@@ -451,6 +451,31 @@ def cmd_guide_generate(args):
         print("\nGuide segment generation failed. Check ffmpeg is installed and content is available.")
 
 
+def cmd_weather_generate(args):
+    """Generate a weather segment for testing."""
+    from .config import load_config
+    from .platform import ensure_directories
+    from .weather.generator import WeatherGenerator
+
+    ensure_directories()
+    config = load_config()
+    generator = WeatherGenerator(config)
+
+    print(f"\nGenerating {config.weather.segment_duration}s weather segment...")
+    print("This may take a minute.\n")
+
+    success = generator.generate_once()
+
+    if success:
+        segment = generator.get_current_segment()
+        if segment:
+            print(f"\nSegment written to: {segment[0]}")
+            print(f"Duration: {segment[2]}s")
+            print(f"Play with: mpv \"{segment[0]}\"")
+    else:
+        print("\nWeather segment generation failed. Check network and ffmpeg.")
+
+
 def cmd_stats(args):
     """Show database statistics."""
     from .db import init_database, db_connection, get_stats
@@ -634,6 +659,14 @@ def main():
                                   help="Generate short 2-minute segment")
     guide_gen_parser.set_defaults(func=cmd_guide_generate)
 
+    # Weather commands
+    weather_parser = subparsers.add_parser("weather", help="Weather Channel commands")
+    weather_sub = weather_parser.add_subparsers(dest="weather_command")
+
+    # weather generate
+    weather_gen_parser = weather_sub.add_parser("generate", help="Generate a weather segment")
+    weather_gen_parser.set_defaults(func=cmd_weather_generate)
+
     # Stats command
     stats_parser = subparsers.add_parser("stats", help="Show statistics")
     stats_parser.set_defaults(func=cmd_stats)
@@ -657,6 +690,9 @@ def main():
         return 1
     if args.command == "guide" and not args.guide_command:
         guide_parser.print_help()
+        return 1
+    if args.command == "weather" and not args.weather_command:
+        weather_parser.print_help()
         return 1
 
     if hasattr(args, "func"):

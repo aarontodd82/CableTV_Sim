@@ -14,6 +14,7 @@ from .mpv_control import MpvController
 
 if TYPE_CHECKING:
     from ..guide.generator import GuideGenerator
+    from ..weather.generator import WeatherGenerator
 
 
 class PlaybackEngine:
@@ -38,6 +39,8 @@ class PlaybackEngine:
         self._on_content_change: Optional[Callable[[NowPlaying], None]] = None
         self._guide_generator: Optional["GuideGenerator"] = None
         self._guide_current_file: Optional[Path] = None
+        self._weather_generator: Optional["WeatherGenerator"] = None
+        self._weather_current_file: Optional[Path] = None
         # Track which content has been "seen" per channel (content_id already advanced)
         self._seen_content: dict[int, int] = {}  # channel -> content_id
         self._bumper_bg_path: Optional[Path] = None
@@ -45,6 +48,10 @@ class PlaybackEngine:
     def set_guide_generator(self, generator: "GuideGenerator") -> None:
         """Set the guide generator for TV Guide channel playback."""
         self._guide_generator = generator
+
+    def set_weather_generator(self, generator: "WeatherGenerator") -> None:
+        """Set the weather generator for Weather Channel playback."""
+        self._weather_generator = generator
 
     @property
     def current_channel(self) -> Optional[int]:
@@ -98,14 +105,19 @@ class PlaybackEngine:
             print(f"Channel {channel_number} not found")
             return False
 
-        # Clear any next-episode bumper overlay from previous content
+        # Clear any persistent overlays from previous content
         self.mpv.remove_osd_overlay(self._NEXT_EP_OVERLAY_ID)
+        self.mpv.remove_osd_overlay(self._WEATHER_CLOCK_OVERLAY_ID)
 
         # Check if this is the guide channel
         if channel_number == self.config.guide.channel_number and self.config.guide.enabled:
             return self._tune_to_guide(channel_number)
 
-        # Clear guide loop mode when tuning to a regular channel
+        # Check if this is the weather channel
+        if channel_number == self.config.weather.channel_number and self.config.weather.enabled:
+            return self._tune_to_weather(channel_number)
+
+        # Clear guide/weather loop mode when tuning to a regular channel
         self.mpv._set_property("loop-file", "no")
 
         # Phase 1: Compute what to play and update state (lock held, no IPC)
@@ -410,8 +422,9 @@ class PlaybackEngine:
             lines.append(str(entry.year))
         self.mpv.show_osd_message("\n".join(lines), 5000)
 
-    # Overlay ID for next-episode bumper (mpv supports 0-63)
+    # Overlay IDs (mpv supports 0-63)
     _NEXT_EP_OVERLAY_ID = 1
+    _WEATHER_CLOCK_OVERLAY_ID = 2
 
     def _show_next_episode_bumper(self, now_playing: NowPlaying,
                                    duration: float = None) -> None:
@@ -632,6 +645,164 @@ class PlaybackEngine:
             with self._lock:
                 if self._current_channel == guide_ch:
                     self._timer = threading.Timer(5.0, self._guide_poll)
+                    self._timer.daemon = True
+                    self._timer.start()
+
+    def _show_weather_clock(self) -> None:
+        """Show/update the live clock overlay on the weather channel.
+
+        Positioned in the reserved clock gap at the right side of the
+        brand bar (rightmost 110px of the 28px-tall bar).
+        The renderer leaves this area as solid background color.
+        """
+        now = datetime.now()
+        time_str = now.strftime("%I:%M %p").lstrip("0").upper()
+        # ASS override tags — position centered in the clock gap area:
+        # Brand bar is 28px tall, clock gap starts at x=530 (640-110)
+        # Center of gap: x=585, y=14. Use \an5 (center anchor).
+        # \bord0 = no border (sits on solid brand-bar background)
+        clock_ass = (
+            r"{\an5\pos(585,14)\bord0\1c&HFFFFFF&\shad0"
+            r"\fnVCR OSD Mono\fs14}" + time_str
+        )
+        self.mpv.show_osd_overlay(self._WEATHER_CLOCK_OVERLAY_ID, clock_ass)
+
+    def _tune_to_weather(self, channel_number: int) -> bool:
+        """
+        Tune to the Weather Channel.
+
+        Plays the pre-rendered weather segment with loop, polling for new
+        segments every 5 seconds (identical pattern to guide channel).
+        """
+        with self._lock:
+            if self._timer:
+                self._timer.cancel()
+                self._timer = None
+            if self._music_end_timer:
+                self._music_end_timer.cancel()
+                self._music_end_timer = None
+            if self._next_ep_timer:
+                self._next_ep_timer.cancel()
+                self._next_ep_timer = None
+            if self._mid_ep_timer:
+                self._mid_ep_timer.cancel()
+                self._mid_ep_timer = None
+
+            self._current_channel = channel_number
+            self._current_playing = None
+
+        if not self._weather_generator or not self._weather_generator.is_ready:
+            channel_config = self.config.channel_map.get(channel_number)
+            name = channel_config.name if channel_config else "Weather Channel"
+            self._show_bumper_background(
+                f"{channel_number}\n{name}\nLoading...", 5000)
+
+            with self._lock:
+                self._timer = threading.Timer(3.0, self._weather_poll)
+                self._timer.daemon = True
+                self._timer.start()
+            return True
+
+        segment_info = self._weather_generator.get_current_segment()
+        if not segment_info:
+            self._show_bumper_background(
+                f"{channel_number}\nWeather Channel\nLoading...", 5000)
+            with self._lock:
+                self._timer = threading.Timer(3.0, self._weather_poll)
+                self._timer.daemon = True
+                self._timer.start()
+            return True
+
+        file_path, generation_time, segment_duration = segment_info
+
+        now = datetime.now()
+        elapsed = (now - generation_time).total_seconds()
+        seek = elapsed % segment_duration if segment_duration > 0 else 0
+
+        self.mpv.set_volume(100)
+        self.mpv._set_property("loop-file", "inf")
+        success = self.mpv.play_file(str(file_path), seek_seconds=seek)
+        if not success:
+            print(f"Failed to play weather segment: {file_path}")
+            self.mpv._set_property("loop-file", "no")
+            return False
+
+        self._show_channel_osd(channel_number)
+        # Start showing the live clock (delayed so channel OSD shows first)
+        clock_timer = threading.Timer(
+            self.config.playback.osd_duration + 0.5, self._show_weather_clock)
+        clock_timer.daemon = True
+        clock_timer.start()
+
+        self._weather_current_file = file_path
+
+        with self._lock:
+            self._timer = threading.Timer(5.0, self._weather_poll)
+            self._timer.daemon = True
+            self._timer.start()
+
+        if self._on_channel_change:
+            self._on_channel_change(channel_number)
+
+        return True
+
+    def _weather_poll(self) -> None:
+        """Poll for weather segment changes. Runs every 5 seconds while on weather channel.
+
+        Also refreshes the live clock overlay each cycle.
+        """
+        with self._lock:
+            channel = self._current_channel
+            self._timer = None
+
+        weather_ch = self.config.weather.channel_number
+        if channel != weather_ch:
+            self.mpv.remove_osd_overlay(self._WEATHER_CLOCK_OVERLAY_ID)
+            return
+
+        try:
+            # Update the live clock overlay
+            self._show_weather_clock()
+
+            if not self._weather_generator or not self._weather_generator.is_ready:
+                with self._lock:
+                    self._timer = threading.Timer(3.0, self._weather_poll)
+                    self._timer.daemon = True
+                    self._timer.start()
+                return
+
+            segment_info = self._weather_generator.get_current_segment()
+            if not segment_info:
+                with self._lock:
+                    self._timer = threading.Timer(3.0, self._weather_poll)
+                    self._timer.daemon = True
+                    self._timer.start()
+                return
+
+            file_path, generation_time, segment_duration = segment_info
+            old_file = self._weather_current_file
+
+            if old_file is None or file_path != old_file:
+                print(f"  Weather: switching to new segment")
+                now = datetime.now()
+                elapsed = (now - generation_time).total_seconds()
+                seek = elapsed % segment_duration if segment_duration > 0 else 0
+
+                self.mpv._set_property("loop-file", "inf")
+                self.mpv.play_file(str(file_path), seek_seconds=seek)
+                self._weather_current_file = file_path
+
+            with self._lock:
+                if self._current_channel == weather_ch:
+                    self._timer = threading.Timer(5.0, self._weather_poll)
+                    self._timer.daemon = True
+                    self._timer.start()
+
+        except Exception as e:
+            print(f"Weather poll error: {e}")
+            with self._lock:
+                if self._current_channel == weather_ch:
+                    self._timer = threading.Timer(5.0, self._weather_poll)
                     self._timer.daemon = True
                     self._timer.start()
 
