@@ -654,18 +654,33 @@ class PlaybackEngine:
         Positioned in the reserved clock gap at the right side of the
         brand bar (rightmost 110px of the 28px-tall bar).
         The renderer leaves this area as solid background color.
+
+        Accounts for overscan: video-margin-ratio shifts the video inward,
+        so the overlay coordinates must shift by the same amount.
         """
         now = datetime.now()
         time_str = now.strftime("%I:%M %p").lstrip("0").upper()
-        # ASS override tags — position centered in the clock gap area:
-        # Brand bar is 28px tall, clock gap starts at x=530 (640-110)
-        # Center of gap: x=585, y=14. Use \an5 (center anchor).
-        # \bord0 = no border (sits on solid brand-bar background)
+
+        # Base position in 640x480 space (center of clock gap)
+        cx, cy = 585, 14
+
+        # Shift inward by overscan margin so overlay aligns with the
+        # shifted video content
+        overscan = self.config.playback.overscan
+        if overscan > 0:
+            margin = overscan / 100.0
+            cx = int(margin * 640) + int((640 - 2 * margin * 640) * (585 / 640))
+            cy = int(margin * 480) + int((480 - 2 * margin * 480) * (14 / 480))
+
         clock_ass = (
-            r"{\an5\pos(585,14)\bord0\1c&HFFFFFF&\shad0"
+            r"{\an5\pos(" + str(cx) + "," + str(cy) + r")"
+            r"\bord0\1c&HFFFFFF&\shad0"
             r"\fnVCR OSD Mono\fs14}" + time_str
         )
-        self.mpv.show_osd_overlay(self._WEATHER_CLOCK_OVERLAY_ID, clock_ass)
+        self.mpv.show_osd_overlay(
+            self._WEATHER_CLOCK_OVERLAY_ID, clock_ass,
+            res_x=640, res_y=480,
+        )
 
     def _tune_to_weather(self, channel_number: int) -> bool:
         """
