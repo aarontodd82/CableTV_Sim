@@ -48,6 +48,7 @@ class PlaybackConfig:
     default_channel: int = 2
     screen: int = -1  # Display index for fullscreen (-1 = default/primary)
     overscan: float = 0.0  # Overscan compensation as percentage (e.g. 5.0 = 5% margin on each edge)
+    bumper_music: str = ""  # Path to background music file for info bumpers
 
 
 @dataclass
@@ -162,6 +163,7 @@ def load_config(config_path: Optional[Path] = None) -> Config:
             default_channel=pb.get("default_channel", 2),
             screen=pb.get("screen", -1),
             overscan=pb.get("overscan", 0.0),
+            bumper_music=pb.get("bumper_music", ""),
         )
 
     # Parse web settings

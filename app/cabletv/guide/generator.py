@@ -448,6 +448,25 @@ class GuideGenerator:
         has_bg_music = bool(bg_music) and Path(bg_music).exists()
 
         if has_bg_music:
+            # Build volume expression that ducks music during promo clips:
+            # 50% during title card gaps, fades to 15% during promos.
+            # Promo/gap pattern: [promo 20s] [gap 20s] [promo 20s] ...
+            pd = gc.promo_duration          # 20s per clip
+            cycle = pd * 2                  # 40s full cycle
+            fade = 1.5                      # fade transition duration
+            low, high = 0.15, 0.5           # volume levels
+            delta = high - low              # 0.35
+            fu = pd - fade                  # fade-up starts before gap
+            fd = cycle - fade               # fade-down starts before promo
+
+            vol_expr = (
+                f"if(lt(mod(t,{cycle}),{fu}),{low},"
+                f"if(lt(mod(t,{cycle}),{pd}),"
+                f"{low}+{delta}*(mod(t,{cycle})-{fu})/{fade},"
+                f"if(lt(mod(t,{cycle}),{fd}),{high},"
+                f"{high}-{delta}*(mod(t,{cycle})-{fd})/{fade})))"
+            )
+
             cmd = [
                 ffmpeg,
                 "-i", str(promo_path),
@@ -460,7 +479,7 @@ class GuideGenerator:
                     f"[1:v]scale={gc.width}:{gc.grid_height}[bottom];"
                     "[top][bottom]vstack=inputs=2[v];"
                     "[0:a]volume=1.0[promo_a];"
-                    f"[2:a]atrim=0:{duration},volume=0.4[bg_a];"
+                    f"[2:a]atrim=0:{duration},volume=eval=frame:volume='{vol_expr}'[bg_a];"
                     "[promo_a][bg_a]amix=inputs=2:duration=longest:dropout_transition=2[a]"
                 ),
                 "-map", "[v]",

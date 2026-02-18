@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional, Callable, TYPE_CHECKING
 
 from ..config import Config
-from ..platform import get_drive_root
+from ..platform import get_content_paths, get_drive_root
 from ..schedule.engine import ScheduleEngine, NowPlaying
 from .mpv_control import MpvController
 
@@ -32,6 +32,7 @@ class PlaybackEngine:
         self._timer: Optional[threading.Timer] = None
         self._music_end_timer: Optional[threading.Timer] = None
         self._next_ep_timer: Optional[threading.Timer] = None
+        self._mid_ep_timer: Optional[threading.Timer] = None
         self._lock = threading.Lock()
         self._on_channel_change: Optional[Callable[[int], None]] = None
         self._on_content_change: Optional[Callable[[NowPlaying], None]] = None
@@ -39,6 +40,7 @@ class PlaybackEngine:
         self._guide_current_file: Optional[Path] = None
         # Track which content has been "seen" per channel (content_id already advanced)
         self._seen_content: dict[int, int] = {}  # channel -> content_id
+        self._bumper_bg_path: Optional[Path] = None
 
     def set_guide_generator(self, generator: "GuideGenerator") -> None:
         """Set the guide generator for TV Guide channel playback."""
@@ -123,6 +125,9 @@ class PlaybackEngine:
             if self._next_ep_timer:
                 self._next_ep_timer.cancel()
                 self._next_ep_timer = None
+            if self._mid_ep_timer:
+                self._mid_ep_timer.cancel()
+                self._mid_ep_timer = None
 
             # Get what's playing on this channel
             now_playing = self.schedule.what_is_on(channel_number)
@@ -192,6 +197,7 @@ class PlaybackEngine:
             self._show_info_bumper(channel_number, now_playing.remaining_seconds)
 
         elif play_action == "play_file":
+            self.mpv.set_volume(100)
             success = self.mpv.play_file(str(file_path), seek_seconds=seek_position)
             if not success:
                 print(f"Failed to play {file_path}")
@@ -223,14 +229,46 @@ class PlaybackEngine:
                     # seek_position + remaining == duration means content plays to the end
                     at_end = (now_playing.seek_position + now_playing.remaining_seconds
                               >= now_playing.entry.duration_seconds - 2.0)
+                    print(f"  [BUMPER DEBUG] {now_playing.entry.series_name}: "
+                          f"seek={now_playing.seek_position:.1f} + "
+                          f"remaining={now_playing.remaining_seconds:.1f} = "
+                          f"{now_playing.seek_position + now_playing.remaining_seconds:.1f} "
+                          f"vs duration={now_playing.entry.duration_seconds:.1f} "
+                          f"at_end={at_end}")
                     if at_end:
-                        bumper_duration = min(30.0, now_playing.remaining_seconds)
+                        # End-of-show bumper: show for last 20s
+                        bumper_duration = min(20.0, now_playing.remaining_seconds)
                         delay = now_playing.remaining_seconds - bumper_duration
+                        print(f"  [BUMPER DEBUG] Scheduling end bumper in {delay:.1f}s "
+                              f"(showing for {bumper_duration:.1f}s)")
                         self._next_ep_timer = threading.Timer(
                             delay, self._show_next_episode_bumper,
                             args=[now_playing])
                         self._next_ep_timer.daemon = True
                         self._next_ep_timer.start()
+                    else:
+                        # Mid-show bumper: show for 20s around the episode's midpoint
+                        ep_midpoint = now_playing.entry.duration_seconds / 2
+                        seg_start = now_playing.seek_position
+                        seg_end = seg_start + now_playing.remaining_seconds
+                        if seg_start < ep_midpoint < seg_end:
+                            # Start early enough to get full 20s display
+                            ideal_delay = ep_midpoint - seg_start
+                            latest_start = now_playing.remaining_seconds - 20.0
+                            mid_delay = max(0, min(ideal_delay, latest_start))
+                            show_duration = min(20.0, now_playing.remaining_seconds - mid_delay)
+                            if show_duration > 10:
+                                print(f"  [BUMPER DEBUG] Scheduling mid bumper in {mid_delay:.1f}s "
+                                      f"(showing for {show_duration:.1f}s)")
+                                self._mid_ep_timer = threading.Timer(
+                                    mid_delay, self._show_next_episode_bumper,
+                                    args=[now_playing, show_duration])
+                                self._mid_ep_timer.daemon = True
+                                self._mid_ep_timer.start()
+                else:
+                    if now_playing.entry.content_type == "show":
+                        print(f"  [BUMPER DEBUG] Skipped: series_name={now_playing.entry.series_name!r} "
+                              f"remaining={now_playing.remaining_seconds:.1f}")
 
         # Phase 3: Schedule next transition timer (lock held)
         with self._lock:
@@ -265,26 +303,76 @@ class PlaybackEngine:
         duration_ms = int(self.config.playback.osd_duration * 1000)
         self.mpv.show_osd_message(message, duration_ms)
 
+    def _show_bumper_background(self, osd_text: str = None,
+                               osd_duration_ms: int = 3000) -> None:
+        """Show the gradient background, optionally with music and OSD text.
+
+        Used for info bumpers, no-content screens, and loading screens.
+        """
+        bg_path = self._get_bumper_background()
+
+        # Check for configured background music
+        music_path = self.config.playback.bumper_music
+        audio_file = None
+        if music_path and Path(music_path).exists():
+            audio_file = music_path
+
+        self.mpv.play_file(str(bg_path), audio_file=audio_file)
+
+        if audio_file:
+            self.mpv.set_volume(50)
+
+        if osd_text:
+            self.mpv.show_osd_message(osd_text, osd_duration_ms)
+
     def _show_no_content_message(self, channel_number: int) -> None:
         """Show 'no content' message on OSD."""
         channel_config = self.config.channel_map.get(channel_number)
         name = channel_config.name if channel_config else f"Channel {channel_number}"
-        self.mpv.show_osd_message(f"{channel_number}\n{name}\nNo content available", 3000)
+        self._show_bumper_background(
+            f"{channel_number}\n{name}\nNo content available", 3000)
+
+    def _get_bumper_background(self) -> Path:
+        """Get the gradient background image for info bumpers, generating if needed."""
+        if self._bumper_bg_path and self._bumper_bg_path.exists():
+            return self._bumper_bg_path
+
+        from PIL import Image
+
+        width, height = 640, 480
+        top = (0, 0, 0)         # Black
+        bottom = (10, 15, 80)   # Dark blue
+
+        # Build raw RGB data row-by-row (fast, no per-pixel calls)
+        rows = []
+        for y in range(height):
+            t = y / (height - 1)
+            r = int(top[0] + (bottom[0] - top[0]) * t)
+            g = int(top[1] + (bottom[1] - top[1]) * t)
+            b = int(top[2] + (bottom[2] - top[2]) * t)
+            rows.append(bytes([r, g, b]) * width)
+
+        img = Image.frombytes("RGB", (width, height), b"".join(rows))
+
+        paths = get_content_paths()
+        bg_path = paths["guide_segments"] / "bumper_bg.png"
+        bg_path.parent.mkdir(parents=True, exist_ok=True)
+        img.save(str(bg_path))
+
+        self._bumper_bg_path = bg_path
+        return bg_path
 
     def _show_info_bumper(self, channel_number: int, seconds_remaining: float) -> None:
         """Show info bumper during gaps in commercial breaks.
 
-        For gaps under 3 seconds, just shows black screen.
+        For gaps under 3 seconds, just shows gradient background.
         For longer gaps, shows a mini-guide with current and upcoming programs.
         """
         channel_config = self.config.channel_map.get(channel_number)
         name = channel_config.name if channel_config else f"Channel {channel_number}"
 
-        # Stop playback to show black screen
-        self.mpv.stop()
-
         if seconds_remaining < 3:
-            # Too short for text — just stay black
+            self._show_bumper_background()
             return
 
         # Build mini-guide: current program + upcoming
@@ -308,7 +396,8 @@ class PlaybackEngine:
                 time_str = start_time.strftime("%I:%M %p").lstrip("0")
                 lines.append(f"{time_str}  {title}")
 
-        self.mpv.show_osd_message("\n".join(lines), int(seconds_remaining * 1000))
+        osd_text = "\n".join(lines)
+        self._show_bumper_background(osd_text, int(seconds_remaining * 1000))
 
     def _show_music_osd(self, now_playing: NowPlaying) -> None:
         """Show artist / title / year OSD for music videos."""
@@ -324,13 +413,25 @@ class PlaybackEngine:
     # Overlay ID for next-episode bumper (mpv supports 0-63)
     _NEXT_EP_OVERLAY_ID = 1
 
-    def _show_next_episode_bumper(self, now_playing: NowPlaying) -> None:
-        """Show 'Catch the next episode' bumper during last segment of a show."""
+    def _show_next_episode_bumper(self, now_playing: NowPlaying,
+                                   duration: float = None) -> None:
+        """Show 'next episode' bumper as a styled ASS overlay.
+
+        Args:
+            now_playing: The content this bumper was scheduled for.
+            duration: If set, auto-remove the overlay after this many seconds.
+                      If None, overlay persists until tune_to() clears it.
+        """
+        print(f"  [BUMPER DEBUG] Timer fired for {now_playing.entry.series_name}"
+              f" (duration={duration})")
         # Safety check: still on same channel, same content
         with self._lock:
             if (self._current_channel != now_playing.entry.channel_number
                     or self._current_playing is None
                     or self._current_playing.entry.content_id != now_playing.entry.content_id):
+                print(f"  [BUMPER DEBUG] Safety check failed: ch={self._current_channel} "
+                      f"vs {now_playing.entry.channel_number}, "
+                      f"playing={self._current_playing is not None}")
                 return
 
         entry = now_playing.entry
@@ -339,11 +440,13 @@ class PlaybackEngine:
                 entry.channel_number, entry.series_name,
                 after_time=entry.slot_end_time)
         except Exception as e:
-            print(f"Error finding next airing: {e}")
+            print(f"  [BUMPER DEBUG] Error finding next airing: {e}")
             return
 
         if not next_time:
+            print(f"  [BUMPER DEBUG] No next airing found for {entry.series_name}")
             return
+        print(f"  [BUMPER DEBUG] Showing overlay: {entry.series_name} next at {next_time}")
 
         # Format day: "Today", "Tomorrow", or weekday name
         today = datetime.now().date()
@@ -371,9 +474,26 @@ class PlaybackEngine:
             r"{\b0\fs18}\N" + day_str + " at " + time_str
         )
 
-        # Use osd-overlay (not show-text) so ASS tags render properly.
-        # Overlay persists until removed by tune_to() on content transition.
-        self.mpv.show_osd_overlay(self._NEXT_EP_OVERLAY_ID, bumper_text)
+        result = self.mpv.show_osd_overlay(self._NEXT_EP_OVERLAY_ID, bumper_text)
+        print(f"  [BUMPER DEBUG] show_osd_overlay returned: {result}")
+
+        # Auto-remove after duration (mid-show bumper), or persist until
+        # tune_to() clears it (end-of-show bumper)
+        if duration:
+            timer = threading.Timer(duration, self._remove_next_ep_overlay,
+                                    args=[now_playing])
+            timer.daemon = True
+            timer.start()
+
+    def _remove_next_ep_overlay(self, now_playing: NowPlaying) -> None:
+        """Remove the next-episode overlay if still on the same content."""
+        with self._lock:
+            still_playing = (
+                self._current_channel == now_playing.entry.channel_number
+                and self._current_playing is not None
+                and self._current_playing.entry.content_id == now_playing.entry.content_id)
+        if still_playing:
+            self.mpv.remove_osd_overlay(self._NEXT_EP_OVERLAY_ID)
 
     def _tune_to_guide(self, channel_number: int) -> bool:
         """
@@ -394,6 +514,9 @@ class PlaybackEngine:
             if self._next_ep_timer:
                 self._next_ep_timer.cancel()
                 self._next_ep_timer = None
+            if self._mid_ep_timer:
+                self._mid_ep_timer.cancel()
+                self._mid_ep_timer = None
 
             self._current_channel = channel_number
             self._current_playing = None
@@ -402,8 +525,8 @@ class PlaybackEngine:
         if not self._guide_generator or not self._guide_generator.is_ready:
             channel_config = self.config.channel_map.get(channel_number)
             name = channel_config.name if channel_config else "TV Guide"
-            self.mpv.stop()
-            self.mpv.show_osd_message(f"{channel_number}\n{name}\nLoading...", 5000)
+            self._show_bumper_background(
+                f"{channel_number}\n{name}\nLoading...", 5000)
 
             # Poll until ready
             with self._lock:
@@ -414,7 +537,8 @@ class PlaybackEngine:
 
         segment_info = self._guide_generator.get_current_segment()
         if not segment_info:
-            self.mpv.show_osd_message(f"{channel_number}\nTV Guide\nLoading...", 5000)
+            self._show_bumper_background(
+                f"{channel_number}\nTV Guide\nLoading...", 5000)
             with self._lock:
                 self._timer = threading.Timer(3.0, self._guide_poll)
                 self._timer.daemon = True
@@ -429,6 +553,7 @@ class PlaybackEngine:
         seek = elapsed % segment_duration if segment_duration > 0 else 0
 
         # Play the segment file, looping so it never stops between polls
+        self.mpv.set_volume(100)
         self.mpv._set_property("loop-file", "inf")
         success = self.mpv.play_file(str(file_path), seek_seconds=seek)
         if not success:
@@ -654,6 +779,9 @@ class PlaybackEngine:
             if self._next_ep_timer:
                 self._next_ep_timer.cancel()
                 self._next_ep_timer = None
+            if self._mid_ep_timer:
+                self._mid_ep_timer.cancel()
+                self._mid_ep_timer = None
 
         self.mpv.stop()
         self._current_playing = None

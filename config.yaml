@@ -173,6 +173,7 @@ playback:
   screen: 1
   # Overscan compensation for CRT (percentage margin on each edge, try 3-7)
   overscan: 2.5
+  bumper_music: "L:\\CableTV_Sim\\music\\bumper.mp3"
 
 web:
   # Web interface bind address (0.0.0.0 for all interfaces)
@@ -199,4 +200,4 @@ guide:
   # Frames per second for guide video
   fps: 15
   # Path to background music file (MP3/WAV), empty for no music
-  background_music: ""
+  background_music: "L:\\CableTV_Sim\\music\\preview.mp3"

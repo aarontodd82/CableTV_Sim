@@ -409,6 +409,12 @@ class ScheduleEngine:
         self._positions[key] = new_pos
         with db_connection() as conn:
             set_series_position(conn, channel_number, group_key, new_pos)
+        # Invalidate cached block selections for this channel — future slots
+        # may now select a different episode with the updated position
+        self._block_cache = {
+            k: v for k, v in self._block_cache.items()
+            if k[0] != channel_number
+        }
 
     def _get_show_weight(self, slot_number: int,
                          channel_num: int,
@@ -976,8 +982,17 @@ class ScheduleEngine:
             while current_time < end_time:
                 now_playing = self.what_is_on(channel_num, current_time)
                 if now_playing:
-                    if not entries or entries[-1].content_id != now_playing.entry.content_id:
-                        # Content changed — clip previous entry's end time
+                    # Detect whether this is truly the same ongoing block or
+                    # a new block that happens to have the same content_id
+                    # (e.g., same movie scheduled again by the RNG).
+                    same_block = (
+                        entries
+                        and entries[-1].content_id == now_playing.entry.content_id
+                        and entries[-1].slot_end_time > current_time
+                    )
+                    if not entries or not same_block:
+                        # Content changed (or same content in a new block)
+                        # — clip previous entry's end time
                         if entries and entries[-1].slot_end_time > current_time:
                             entries[-1].slot_end_time = current_time
                         # Clip start_time: when exclusions change mid-block, the
@@ -1037,11 +1052,14 @@ class ScheduleEngine:
                 duration_str = duration_to_hms(entry.duration_seconds)
                 slot_duration_str = duration_to_hms((entry.slot_end_time - entry.start_time).total_seconds())
 
+                # Use series name for shows (episode depends on viewing history)
+                display_title = entry.series_name if entry.series_name else entry.title
+
                 # Show both content duration and slot duration if different
                 if entry.commercial_padding_seconds > 0:
-                    lines.append(f"  {start_str}  {entry.title} ({duration_str} + commercials)")
+                    lines.append(f"  {start_str}  {display_title} ({duration_str} + commercials)")
                 else:
-                    lines.append(f"  {start_str}  {entry.title} ({duration_str})")
+                    lines.append(f"  {start_str}  {display_title} ({duration_str})")
 
         return "\n".join(lines)
 
@@ -1106,10 +1124,15 @@ class ScheduleEngine:
             future = self.what_is_on(channel_number, scan_time + timedelta(seconds=0.1))
             if not future:
                 break
-            # Build display title — include artist for music content
-            title = future.entry.title
-            if future.entry.artist:
-                title = f"{future.entry.artist} - {title}"
+            # Build display title — use series name for shows (episode
+            # depends on viewing history), artist for music content
+            entry = future.entry
+            if entry.series_name:
+                title = entry.series_name
+            elif entry.artist:
+                title = f"{entry.artist} - {entry.title}"
+            else:
+                title = entry.title
             upcoming.append((future.entry.start_time, title))
             scan_time = future.entry.slot_end_time
 

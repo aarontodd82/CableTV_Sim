@@ -191,14 +191,15 @@ class MpvController:
                     return data
         return None
 
-    def _send_command(self, command: list, wait_response: bool = True) -> Optional[dict]:
+    def _send_command(self, command, wait_response: bool = True) -> Optional[dict]:
         """
         Send a command to mpv via IPC.
 
         Thread-safe: all IPC access is serialized via _ipc_lock.
 
         Args:
-            command: Command as list (e.g., ["loadfile", "/path/to/file"])
+            command: Command as list (positional args) or dict (named args).
+                     Named args format: {"name": "cmd", "param": value, ...}
             wait_response: Wait for response
 
         Returns:
@@ -268,19 +269,25 @@ class MpvController:
         response = self._send_command(["set_property", name, value])
         return response is not None and response.get("error") == "success"
 
-    def play_file(self, path: str, seek_seconds: float = 0) -> bool:
+    def play_file(self, path: str, seek_seconds: float = 0,
+                  audio_file: Optional[str] = None) -> bool:
         """
         Load and play a file.
 
         Args:
             path: Path to the video file
             seek_seconds: Position to seek to after loading
+            audio_file: Optional audio file to play alongside (e.g. for images)
 
         Returns:
             True if successful
         """
-        # Load the file
-        response = self._send_command(["loadfile", path, "replace"])
+        # Load the file, with optional audio attachment
+        if audio_file:
+            options = f"audio-file={audio_file},image-display-duration=inf"
+            response = self._send_command(["loadfile", path, "replace", -1, options])
+        else:
+            response = self._send_command(["loadfile", path, "replace"])
         if response is None:
             return False
 
@@ -365,14 +372,16 @@ class MpvController:
         Returns:
             True if successful
         """
-        response = self._send_command(["osd-overlay", {
+        # osd-overlay requires named arguments (mpv_command_node format)
+        response = self._send_command({
+            "name": "osd-overlay",
             "id": overlay_id,
             "format": "ass-events",
             "data": data,
             "res_x": res_x,
             "res_y": res_y,
             "z": z,
-        }])
+        })
         return response is not None and response.get("error") == "success"
 
     def remove_osd_overlay(self, overlay_id: int) -> bool:
@@ -385,11 +394,12 @@ class MpvController:
         Returns:
             True if successful
         """
-        response = self._send_command(["osd-overlay", {
+        response = self._send_command({
+            "name": "osd-overlay",
             "id": overlay_id,
             "format": "none",
             "data": "",
-        }])
+        })
         return response is not None
 
     def get_position(self) -> Optional[float]:

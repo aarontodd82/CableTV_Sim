@@ -328,7 +328,8 @@ class GuideGridRenderer:
                 )
 
                 # Show title (middle of cell, larger font)
-                title = entry.title
+                # Use series name for shows (episode depends on viewing history)
+                title = entry.series_name if entry.series_name else entry.title
                 # Rough character limit based on available width
                 max_chars = max(1, available_width // 9)
                 if len(title) > max_chars:
