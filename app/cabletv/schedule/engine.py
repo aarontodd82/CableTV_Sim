@@ -1,12 +1,16 @@
 """Schedule engine for deterministic content scheduling."""
 
+import hashlib
 import random
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Optional
 
 from ..config import Config, ChannelConfig
-from ..db import db_connection, get_ready_content, get_content_with_tags, get_break_points
+from ..db import (
+    db_connection, get_ready_content, get_content_with_tags, get_break_points,
+    load_all_series_positions, set_series_position,
+)
 from ..utils.time_utils import (
     parse_epoch, get_slot_number, get_slot_start, get_slot_end,
     slots_needed, get_position_in_slot, format_schedule_time,
@@ -27,6 +31,12 @@ class TimelineSegment:
     break_index: int = 0  # Which break this is (for deterministic commercial selection)
 
 
+@dataclass
+class ContentGroup:
+    """A group of related content (series episodes or a standalone item)."""
+    group_key: str  # series_name for shows, "standalone_{content_id}" for movies
+    items: list[dict]  # Episodes sorted by (season, episode, id)
+    is_standalone: bool  # True for single-item groups (movies, standalone content)
 
 
 # Guaranteed info bumper duration range (seconds)
@@ -205,6 +215,9 @@ class ScheduleEntry:
     slot_end_time: datetime  # When the slot(s) actually end (for commercial padding)
     artist: Optional[str] = None
     year: Optional[int] = None
+    series_name: Optional[str] = None
+    season: Optional[int] = None
+    episode: Optional[int] = None
 
     @property
     def is_playing(self) -> bool:
@@ -268,6 +281,11 @@ class ScheduleEngine:
         # Generate a fresh random seed each launch so the schedule varies
         self.seed = random.randint(0, 2**31 - 1)
         self._channel_pools: dict[int, list[dict]] = {}
+        self._channel_groups: dict[int, list[ContentGroup]] = {}
+        self._positions: dict[tuple[int, str], int] = {}  # (channel, group_key) -> position
+        self._positions_loaded = False
+        self._block_cache: dict[tuple[int, int], tuple[int, dict]] = {}  # (channel, target_slot) -> (start_slot, content)
+        self._type_avg_durations: dict[int, tuple[float, float]] = {}  # channel -> (avg_show, avg_movie)
 
     def _get_channel_seed(self, channel_number: int, slot_number: int) -> int:
         """Get deterministic seed for a specific channel and slot."""
@@ -300,9 +318,143 @@ class ScheduleEngine:
         self._channel_pools[channel_num] = pool
         return pool
 
+    def get_channel_groups(self, channel_config: ChannelConfig) -> list[ContentGroup]:
+        """
+        Group a channel's content pool by series, with episodes sorted.
+
+        Shows with the same series_name become one group. Movies and content
+        without a series_name become standalone groups (one item each).
+        Cached per channel.
+        """
+        channel_num = channel_config.number
+        if channel_num in self._channel_groups:
+            return self._channel_groups[channel_num]
+
+        pool = self.get_channel_pool(channel_config)
+
+        series_map: dict[str, list[dict]] = {}
+        standalones: list[ContentGroup] = []
+
+        for content in pool:
+            series = content.get("series_name")
+            if series:
+                if series not in series_map:
+                    series_map[series] = []
+                series_map[series].append(content)
+            else:
+                standalones.append(ContentGroup(
+                    group_key=f"standalone_{content['id']}",
+                    items=[content],
+                    is_standalone=True,
+                ))
+
+        groups: list[ContentGroup] = []
+        for series_name, items in series_map.items():
+            sorted_items = sorted(items, key=lambda c: (
+                c.get("season") or 0,
+                c.get("episode") or 0,
+                c["id"],
+            ))
+            groups.append(ContentGroup(
+                group_key=series_name,
+                items=sorted_items,
+                is_standalone=False,
+            ))
+
+        groups.extend(standalones)
+        groups.sort(key=lambda g: g.group_key)
+
+        self._channel_groups[channel_num] = groups
+        return groups
+
     def clear_cache(self) -> None:
-        """Clear the channel pool cache."""
+        """Clear all caches (pool, group, block)."""
         self._channel_pools.clear()
+        self._channel_groups.clear()
+        self._block_cache.clear()
+        self._type_avg_durations.clear()
+
+    def _load_positions(self) -> None:
+        """Lazy-load all series positions from the database."""
+        if self._positions_loaded:
+            return
+        with db_connection() as conn:
+            self._positions = load_all_series_positions(conn)
+        self._positions_loaded = True
+
+    def _get_position(self, channel_number: int, group: ContentGroup) -> int:
+        """
+        Get the current episode index for a group on a channel.
+
+        If no position is stored, computes a deterministic initial position
+        from the channel number and group key (independent of session seed,
+        so it's stable across launches).
+        """
+        self._load_positions()
+        key = (channel_number, group.group_key)
+        if key in self._positions:
+            return self._positions[key] % len(group.items)
+        # Deterministic initial position — stable across launches
+        hash_input = f"{channel_number}:{group.group_key}"
+        hash_val = int(hashlib.md5(hash_input.encode()).hexdigest(), 16)
+        initial = hash_val % len(group.items)
+        self._positions[key] = initial
+        return initial
+
+    def advance_position(self, channel_number: int, group_key: str, num_items: int) -> None:
+        """Advance the episode position for a group on a channel and persist to DB."""
+        key = (channel_number, group_key)
+        current = self._positions.get(key, 0)
+        new_pos = (current + 1) % num_items
+        self._positions[key] = new_pos
+        with db_connection() as conn:
+            set_series_position(conn, channel_number, group_key, new_pos)
+
+    def _get_show_weight(self, slot_number: int,
+                         channel_num: int,
+                         show_groups: list[ContentGroup],
+                         movie_groups: list[ContentGroup]) -> float:
+        """
+        Get show selection probability normalized for equal airtime,
+        with time-of-day adjustment for authentic 90s cable feel.
+
+        Because movies are ~3-4x longer than show episodes, selecting
+        them at equal rates gives movies ~75% of the airtime. This
+        compensates by weighting show selections higher based on the
+        actual duration ratio, then applies a time-of-day modifier
+        (more shows during daytime, more movies at night).
+        """
+        # Get average durations per type (cached per channel)
+        if channel_num not in self._type_avg_durations:
+            avg_s = (sum(g.items[0]["duration_seconds"] for g in show_groups)
+                     / len(show_groups))
+            avg_m = (sum(g.items[0]["duration_seconds"] for g in movie_groups)
+                     / len(movie_groups))
+            self._type_avg_durations[channel_num] = (avg_s, avg_m)
+        avg_show, avg_movie = self._type_avg_durations[channel_num]
+
+        # Base weight: compensate for duration difference, biased slightly
+        # toward shows since movies' longer runtime still gives them an
+        # outsized airtime footprint even after normalization.
+        ratio = avg_movie / avg_show
+        base = ratio / (1 + ratio) + 0.10
+
+        # Time-of-day modifier (shifts airtime balance ±10-15%)
+        slot_start = get_slot_start(slot_number, self.epoch, self.slot_duration)
+        hour = slot_start.hour
+
+        if 6 <= hour < 10:
+            modifier = 0.0     # Morning: balanced
+        elif 10 <= hour < 16:
+            modifier = 0.05    # Daytime: more shows (syndication block)
+        elif 16 <= hour < 19:
+            modifier = 0.0     # Early evening: balanced
+        elif 19 <= hour < 23:
+            modifier = -0.10   # Primetime: more movies
+        else:
+            modifier = -0.15   # Late night: movie blocks
+
+        return max(0.1, min(0.9, base + modifier))
 
     def _select_content_for_slot(
         self,
@@ -311,7 +463,15 @@ class ScheduleEngine:
         exclude_ids: Optional[set[int]] = None
     ) -> Optional[dict]:
         """
-        Select content for a specific slot deterministically.
+        Select content for a specific slot using two-tier selection.
+
+        First normalizes show vs movie selection for roughly equal airtime
+        (compensating for movies being ~3-4x longer). Time-of-day weighting
+        skews towards shows during daytime and movies at night, matching
+        authentic 90s cable patterns.
+
+        Within the chosen type, picks a group uniformly, then returns the
+        episode at the group's current position for this channel.
 
         Args:
             channel_config: Channel configuration
@@ -321,20 +481,44 @@ class ScheduleEngine:
         Returns:
             Content dict or None if pool is empty
         """
-        pool = self.get_channel_pool(channel_config)
-        if not pool:
+        groups = self.get_channel_groups(channel_config)
+        if not groups:
             return None
 
-        # Filter out excluded IDs
-        available = pool
-        if exclude_ids:
-            available = [c for c in pool if c["id"] not in exclude_ids]
-            if not available:
-                available = pool  # Fall back to full pool if all excluded
+        channel_num = channel_config.number
 
-        # Use deterministic random selection
+        # Filter groups whose current episode is excluded
+        available = groups
+        if exclude_ids:
+            available = [
+                g for g in groups
+                if g.items[self._get_position(channel_num, g)]["id"] not in exclude_ids
+            ]
+            if not available:
+                available = groups  # Fall back to full list if all excluded
+
+        # Deterministic group selection
         rng = random.Random(self._get_channel_seed(channel_config.number, slot_number))
-        return rng.choice(available)
+
+        # Normalize show/movie balance with duration + time-of-day weighting.
+        # Split by type, pick type first, then group within type.
+        show_groups = [g for g in available if g.items[0]["content_type"] == "show"]
+        movie_groups = [g for g in available if g.items[0]["content_type"] == "movie"]
+
+        if show_groups and movie_groups:
+            show_weight = self._get_show_weight(
+                slot_number, channel_num, show_groups, movie_groups)
+            if rng.random() < show_weight:
+                group = rng.choice(show_groups)
+            else:
+                group = rng.choice(movie_groups)
+        else:
+            # Only one type on this channel — pick from all available
+            group = rng.choice(available)
+
+        # Return the episode at the current position
+        pos = self._get_position(channel_num, group)
+        return group.items[pos]
 
     # Anchor size for walk-forward alignment. All target_slots in the same
     # anchor block start their walk from the same point, guaranteeing that
@@ -356,6 +540,13 @@ class ScheduleEngine:
         is aligned so that nearby target_slots always walk from the same
         starting point, producing consistent content assignments.
 
+        Results are cached per (channel, target_slot) so that position
+        advances mid-block don't change what's already playing. The cache
+        lives at this level (not _select_content_for_slot) because the
+        exclusion set for a given (channel, slot) is deterministic, while
+        intermediate walk slots can be visited with different exclusion
+        contexts by different callers.
+
         Args:
             channel_config: Channel config
             target_slot: The slot to find content for
@@ -364,6 +555,15 @@ class ScheduleEngine:
         Returns:
             Tuple of (start_slot, content_dict)
         """
+        cache_key = (channel_config.number, target_slot)
+        cached = self._block_cache.get(cache_key)
+        if cached is not None:
+            start_slot, content = cached
+            if not content:
+                return start_slot, content
+            if not exclude_ids or content["id"] not in exclude_ids:
+                return start_slot, content
+
         # Align walk start to a fixed anchor so nearby slots cascade identically.
         # Overlap by 10 slots to catch multi-slot content crossing the anchor boundary.
         anchor = (target_slot // self._ANCHOR_SIZE) * self._ANCHOR_SIZE
@@ -382,6 +582,7 @@ class ScheduleEngine:
 
             if end_slot > target_slot:
                 # This content spans to cover target_slot
+                self._block_cache[cache_key] = (current_slot, content)
                 return current_slot, content
 
             # Content ends before target_slot, skip to next available slot
@@ -390,7 +591,9 @@ class ScheduleEngine:
         # Fallback (shouldn't reach here)
         content = self._select_content_for_slot(
             channel_config, target_slot, exclude_ids=exclude_ids)
-        return target_slot, content if content else {}
+        result = (target_slot, content if content else {})
+        self._block_cache[cache_key] = result
+        return result
 
     def _get_content_break_points(self, content_id: int) -> list[float]:
         """Get break points for content from the database."""
@@ -473,6 +676,9 @@ class ScheduleEngine:
                     slot_end_time=item_end_time,  # No commercial padding
                     artist=content.get("artist"),
                     year=content.get("year"),
+                    series_name=content.get("series_name"),
+                    season=content.get("season"),
+                    episode=content.get("episode"),
                 )
 
                 return NowPlaying(
@@ -583,6 +789,9 @@ class ScheduleEngine:
             file_path=file_path,
             channel_number=channel_number,
             slot_end_time=slot_end_time,
+            series_name=content.get("series_name"),
+            season=content.get("season"),
+            episode=content.get("episode"),
         )
 
         if current_segment.segment_type == "content":
@@ -675,6 +884,53 @@ class ScheduleEngine:
                     is_commercial=True,
                     commercial=None,
                 )
+
+    def find_next_airing(
+        self,
+        channel_number: int,
+        series_name: str,
+        after_time: Optional[datetime] = None
+    ) -> Optional[datetime]:
+        """
+        Find the next time a series airs on a channel.
+
+        Walks forward through future slots to find the next content block
+        featuring the given series. Used for promotional bumpers.
+
+        Args:
+            channel_number: Channel to search
+            series_name: Series name to look for
+            after_time: Start searching after this time (default: now)
+
+        Returns:
+            Start time of the next airing, or None if not found within 14 days
+        """
+        channel_config = self.config.channel_map.get(channel_number)
+        if not channel_config:
+            return None
+
+        if after_time is None:
+            after_time = datetime.now()
+
+        start_slot = get_slot_number(after_time, self.epoch, self.slot_duration) + 1
+        current_slot = start_slot
+
+        # Search up to 672 slots (~14 days of 30-min slots)
+        while current_slot < start_slot + 672:
+            block_start, content = self._find_block_start(
+                channel_config, current_slot)
+            if not content:
+                current_slot += 1
+                continue
+
+            if content.get("series_name") == series_name:
+                return get_slot_start(block_start, self.epoch, self.slot_duration)
+
+            # Skip forward by content's slot span to avoid checking every slot
+            num = slots_needed(content["duration_seconds"], self.slot_duration)
+            current_slot = max(current_slot + 1, block_start + num)
+
+        return None
 
     def get_guide_data(
         self,

@@ -347,6 +347,51 @@ class MpvController:
         response = self._send_command(["show-text", text, str(duration_ms)])
         return response is not None
 
+    def show_osd_overlay(self, overlay_id: int, data: str,
+                         res_x: int = 0, res_y: int = 0, z: int = 0) -> bool:
+        """
+        Show an ASS-formatted overlay on screen.
+
+        Unlike show_osd_message, this supports full ASS override tags
+        for styled text. The overlay persists until explicitly removed.
+
+        Args:
+            overlay_id: Unique ID for this overlay (0-63)
+            data: ASS event text (with override tags like {\\an2\\b1})
+            res_x: Virtual resolution width (0 = use display resolution)
+            res_y: Virtual resolution height (0 = use display resolution)
+            z: Z-order for stacking overlays
+
+        Returns:
+            True if successful
+        """
+        response = self._send_command(["osd-overlay", {
+            "id": overlay_id,
+            "format": "ass-events",
+            "data": data,
+            "res_x": res_x,
+            "res_y": res_y,
+            "z": z,
+        }])
+        return response is not None and response.get("error") == "success"
+
+    def remove_osd_overlay(self, overlay_id: int) -> bool:
+        """
+        Remove an OSD overlay by ID.
+
+        Args:
+            overlay_id: The overlay ID to remove
+
+        Returns:
+            True if successful
+        """
+        response = self._send_command(["osd-overlay", {
+            "id": overlay_id,
+            "format": "none",
+            "data": "",
+        }])
+        return response is not None
+
     def get_position(self) -> Optional[float]:
         """Get current playback position in seconds."""
         return self._get_property("time-pos")

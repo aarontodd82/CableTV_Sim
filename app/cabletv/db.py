@@ -311,6 +311,17 @@ def init_database(db_path: Optional[Path] = None) -> None:
             )
         """)
 
+        # Series position tracking for sequential episode ordering
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS series_positions (
+                channel_number INTEGER NOT NULL,
+                group_key TEXT NOT NULL,
+                position INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (channel_number, group_key)
+            )
+        """)
+
         # Create indexes for common queries
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_content_status ON content(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_content_type ON content(content_type)")
@@ -732,4 +743,47 @@ def get_stats(conn: sqlite3.Connection) -> dict:
         "total_ready": sum(type_counts.values()),
         "total_duration_hours": total_duration / 3600,
         "by_tag": tag_counts,
+    }
+
+
+# Series position operations
+
+def get_series_position(conn: sqlite3.Connection, channel_number: int, group_key: str) -> Optional[int]:
+    """Get the current episode position for a series on a channel.
+
+    Returns:
+        Position index, or None if not set
+    """
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT position FROM series_positions WHERE channel_number = ? AND group_key = ?",
+        (channel_number, group_key)
+    )
+    row = cursor.fetchone()
+    return row["position"] if row else None
+
+
+def set_series_position(conn: sqlite3.Connection, channel_number: int, group_key: str, position: int) -> None:
+    """Set or update the episode position for a series on a channel."""
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO series_positions (channel_number, group_key, position, updated_at)
+        VALUES (?, ?, ?, datetime('now'))
+        ON CONFLICT(channel_number, group_key) DO UPDATE SET
+            position = excluded.position,
+            updated_at = excluded.updated_at
+    """, (channel_number, group_key, position))
+
+
+def load_all_series_positions(conn: sqlite3.Connection) -> dict[tuple[int, str], int]:
+    """Load all series positions into memory.
+
+    Returns:
+        Dict mapping (channel_number, group_key) -> position
+    """
+    cursor = conn.cursor()
+    cursor.execute("SELECT channel_number, group_key, position FROM series_positions")
+    return {
+        (row["channel_number"], row["group_key"]): row["position"]
+        for row in cursor.fetchall()
     }

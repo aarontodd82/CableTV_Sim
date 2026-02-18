@@ -170,7 +170,7 @@ playback:
   # Default channel on startup
   default_channel: 3
   # Display index for fullscreen (-1 = default, 0 = first, 1 = second, etc.)
-  screen: 2
+  screen: 1
   # Overscan compensation for CRT (percentage margin on each edge, try 3-7)
   overscan: 2.5
 

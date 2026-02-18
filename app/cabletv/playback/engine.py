@@ -31,11 +31,14 @@ class PlaybackEngine:
         self._current_playing: Optional[NowPlaying] = None
         self._timer: Optional[threading.Timer] = None
         self._music_end_timer: Optional[threading.Timer] = None
+        self._next_ep_timer: Optional[threading.Timer] = None
         self._lock = threading.Lock()
         self._on_channel_change: Optional[Callable[[int], None]] = None
         self._on_content_change: Optional[Callable[[NowPlaying], None]] = None
         self._guide_generator: Optional["GuideGenerator"] = None
         self._guide_current_file: Optional[Path] = None
+        # Track which content has been "seen" per channel (content_id already advanced)
+        self._seen_content: dict[int, int] = {}  # channel -> content_id
 
     def set_guide_generator(self, generator: "GuideGenerator") -> None:
         """Set the guide generator for TV Guide channel playback."""
@@ -93,6 +96,9 @@ class PlaybackEngine:
             print(f"Channel {channel_number} not found")
             return False
 
+        # Clear any next-episode bumper overlay from previous content
+        self.mpv.remove_osd_overlay(self._NEXT_EP_OVERLAY_ID)
+
         # Check if this is the guide channel
         if channel_number == self.config.guide.channel_number and self.config.guide.enabled:
             return self._tune_to_guide(channel_number)
@@ -114,9 +120,33 @@ class PlaybackEngine:
             if self._music_end_timer:
                 self._music_end_timer.cancel()
                 self._music_end_timer = None
+            if self._next_ep_timer:
+                self._next_ep_timer.cancel()
+                self._next_ep_timer = None
 
             # Get what's playing on this channel
             now_playing = self.schedule.what_is_on(channel_number)
+
+            # Advance series position on first sight — if you see an episode
+            # playing, it's consumed and the next selection will be the next episode.
+            # Slot cache in the schedule engine prevents this from affecting
+            # the currently-playing block.
+            advance_info = None
+            if now_playing and not now_playing.is_commercial:
+                content_id = now_playing.entry.content_id
+                if self._seen_content.get(channel_number) != content_id:
+                    # First time seeing this episode on this channel — advance it
+                    self._seen_content[channel_number] = content_id
+                    entry = now_playing.entry
+                    gk = entry.series_name if entry.series_name else f"standalone_{entry.content_id}"
+                    ch_config = self.config.channel_map.get(channel_number)
+                    group_size = 1
+                    if ch_config:
+                        for g in self.schedule.get_channel_groups(ch_config):
+                            if g.group_key == gk:
+                                group_size = len(g.items)
+                                break
+                    advance_info = (content_id, gk, group_size)
 
             if not now_playing:
                 self._current_channel = channel_number
@@ -144,6 +174,14 @@ class PlaybackEngine:
                 # Update state
                 self._current_channel = channel_number
                 self._current_playing = now_playing
+
+        # Advance series position outside the lock (DB I/O)
+        if advance_info:
+            _, prev_group_key, prev_group_size = advance_info
+            try:
+                self.schedule.advance_position(channel_number, prev_group_key, prev_group_size)
+            except Exception as e:
+                print(f"Error advancing series position: {e}")
 
         # Phase 2: Execute mpv commands (NO lock — IPC has its own lock)
         if play_action == "no_content":
@@ -176,6 +214,23 @@ class PlaybackEngine:
                     self._music_end_timer.start()
             else:
                 self._show_channel_osd(channel_number, now_playing)
+
+                # Schedule "next episode" bumper for shows in their last content segment
+                if (now_playing.entry.content_type == "show"
+                        and now_playing.entry.series_name
+                        and now_playing.remaining_seconds > 3):
+                    # Check if this is the last content segment:
+                    # seek_position + remaining == duration means content plays to the end
+                    at_end = (now_playing.seek_position + now_playing.remaining_seconds
+                              >= now_playing.entry.duration_seconds - 2.0)
+                    if at_end:
+                        bumper_duration = min(30.0, now_playing.remaining_seconds)
+                        delay = now_playing.remaining_seconds - bumper_duration
+                        self._next_ep_timer = threading.Timer(
+                            delay, self._show_next_episode_bumper,
+                            args=[now_playing])
+                        self._next_ep_timer.daemon = True
+                        self._next_ep_timer.start()
 
         # Phase 3: Schedule next transition timer (lock held)
         with self._lock:
@@ -266,6 +321,60 @@ class PlaybackEngine:
             lines.append(str(entry.year))
         self.mpv.show_osd_message("\n".join(lines), 5000)
 
+    # Overlay ID for next-episode bumper (mpv supports 0-63)
+    _NEXT_EP_OVERLAY_ID = 1
+
+    def _show_next_episode_bumper(self, now_playing: NowPlaying) -> None:
+        """Show 'Catch the next episode' bumper during last segment of a show."""
+        # Safety check: still on same channel, same content
+        with self._lock:
+            if (self._current_channel != now_playing.entry.channel_number
+                    or self._current_playing is None
+                    or self._current_playing.entry.content_id != now_playing.entry.content_id):
+                return
+
+        entry = now_playing.entry
+        try:
+            next_time = self.schedule.find_next_airing(
+                entry.channel_number, entry.series_name,
+                after_time=entry.slot_end_time)
+        except Exception as e:
+            print(f"Error finding next airing: {e}")
+            return
+
+        if not next_time:
+            return
+
+        # Format day: "Today", "Tomorrow", or weekday name
+        today = datetime.now().date()
+        next_date = next_time.date()
+        delta_days = (next_date - today).days
+
+        if delta_days == 0:
+            day_str = "Today"
+        elif delta_days == 1:
+            day_str = "Tomorrow"
+        else:
+            day_str = next_time.strftime("%A")  # "Wednesday"
+
+        time_str = next_time.strftime("%I:%M %p").lstrip("0")  # "7:30 PM"
+
+        series = entry.series_name
+
+        # ASS override tags for styled bottom-center bumper:
+        # \an2 = bottom-center, \bord6 = thick border (acts as background),
+        # \3c&H000000& = black border color, \3a&H80& = semi-transparent border,
+        # \1c&HFFFFFF& = white text, \shad0 = no shadow
+        bumper_text = (
+            r"{\an2\bord6\3c&H000000&\3a&H80&\1c&HFFFFFF&\shad0"
+            r"\b1\fs20}" + series +
+            r"{\b0\fs18}\N" + day_str + " at " + time_str
+        )
+
+        # Use osd-overlay (not show-text) so ASS tags render properly.
+        # Overlay persists until removed by tune_to() on content transition.
+        self.mpv.show_osd_overlay(self._NEXT_EP_OVERLAY_ID, bumper_text)
+
     def _tune_to_guide(self, channel_number: int) -> bool:
         """
         Tune to the TV Guide channel.
@@ -282,6 +391,9 @@ class PlaybackEngine:
             if self._music_end_timer:
                 self._music_end_timer.cancel()
                 self._music_end_timer = None
+            if self._next_ep_timer:
+                self._next_ep_timer.cancel()
+                self._next_ep_timer = None
 
             self._current_channel = channel_number
             self._current_playing = None
@@ -539,6 +651,9 @@ class PlaybackEngine:
             if self._music_end_timer:
                 self._music_end_timer.cancel()
                 self._music_end_timer = None
+            if self._next_ep_timer:
+                self._next_ep_timer.cancel()
+                self._next_ep_timer = None
 
         self.mpv.stop()
         self._current_playing = None

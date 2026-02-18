@@ -14,14 +14,19 @@ cabletv.db           → SQLite (WAL mode)
 content/originals/   → Raw video files
 content/normalized/  → Transcoded 640x480 4:3 MP4s
 commercials/         → Commercial video files
+guide/               → Generated guide video segments
 
 app/cabletv/
 ├── schedule/
-│   ├── engine.py        → Timeline building, what_is_on()
+│   ├── engine.py        → Timeline building, what_is_on(), two-tier selection
 │   └── commercials.py   → Commercial selection, slot breakdown
 ├── playback/
-│   ├── engine.py        → Channel switching, segment transitions
+│   ├── engine.py        → Channel switching, segment transitions, position advancement
 │   └── mpv_control.py   → mpv TCP IPC (port 9876)
+├── guide/
+│   ├── generator.py     → Background guide segment generation
+│   ├── renderer.py      → Prevue-style scrolling grid (Pillow)
+│   └── promos.py        → Promo clip selection
 ├── ingest/              → 5-stage pipeline
 ├── interface/           → Flask web API + remote UI
 └── utils/               → ffmpeg, time calculations
@@ -29,16 +34,37 @@ app/cabletv/
 
 ## Core Algorithm
 
+### Two-Tier Content Selection
+
+Content is selected in two steps so that every series/movie gets equal scheduling weight regardless of episode count:
+
+1. **Group**: Pool is grouped by `series_name` (shows) or as standalone items (movies, content without series_name)
+2. **Select group**: RNG picks a group uniformly — "Married with Children" (260 eps) gets the same chance as "The Matrix" (1 movie)
+3. **Select episode**: Returns the episode at the group's current position for this channel
+
+Groups are cached per channel in `_channel_groups`. Standalone groups contain a single item.
+
+### Sequential Episode Ordering
+
+Episodes play in season/episode order per channel, not randomly:
+
+- **Position tracking**: `series_positions` table stores `(channel_number, group_key) → position`
+- **Initial position**: Deterministic from `md5(channel:group_key)` — NOT the session seed, so it's stable across launches
+- **Advancement**: Position increments only when the playback engine confirms content actually played (in `tune_to()`)
+- **Wrap-around**: `position % len(items)` — handles episodes added/deleted gracefully
+- **In-memory cache**: Positions lazy-loaded from DB on first access, persisted on advance
+
 ### Schedule Calculation (on every query)
 
 ```python
 what_is_on(channel=5, when=now)
   1. Calculate slot number from epoch + current time
-  2. Walk backward to find content block start (handles multi-slot content)
-  3. Fetch break points from database
-  4. Build timeline: [content, commercial, content, commercial, ..., end padding]
-  5. Find which segment we're in based on elapsed time
-  6. Return: file path + seek position (content or commercial)
+  2. Walk forward from anchor point to find content block start
+  3. Two-tier selection: pick group, then episode at current position
+  4. Fetch break points from database
+  5. Build timeline: [content, commercial, content, commercial, ..., end padding]
+  6. Find which segment we're in based on elapsed time
+  7. Return: file path + seek position (content or commercial)
 ```
 
 ### Timeline Building
@@ -57,10 +83,8 @@ Commercial time is distributed evenly across all breaks (including end).
 
 ### Info Bumpers
 
-When commercials can't perfectly fill a break, the remaining time becomes an info bumper:
-- **Under 3 seconds**: black screen (barely noticeable)
-- **3+ seconds**: black screen with OSD mini-guide showing current program and next 2 upcoming programs with start times
-- Variable duration — fills whatever gap commercials leave
+Every commercial break includes a guaranteed info bumper (5-8 seconds, carved from commercial time):
+- Black screen with OSD mini-guide showing current program and next 2 upcoming programs with start times
 - Uses `schedule.get_upcoming()` to fetch upcoming program info
 
 ### Commercial Selection
@@ -92,23 +116,29 @@ Deterministic RNG seeded by: `seed + (channel * 10000) + slot_number + break_ind
 5. **Relative paths only** - database stores paths relative to drive root
 6. **WAL mode SQLite** - concurrent read/write
 7. **Grid aligns with real time** - epoch at midnight means slots start at :00/:30
+8. **Two-tier selection** - equal weight per series/title, not per episode
+9. **Sequential episodes** - position persisted in DB, advances only on actual playback
 
 ## Database Schema
 
 ```sql
-content: id, title, content_type, duration_seconds, original_path,
-         normalized_path, file_hash, status, ...
+content: id, title, content_type, series_name, season, episode, year,
+         duration_seconds, original_path, normalized_path, file_hash,
+         tmdb_id, artist, status, ...
 tags: id, name, description
 content_tags: content_id, tag_id
 break_points: id, content_id, timestamp_seconds, confidence
+series_positions: channel_number, group_key, position, updated_at
 ```
 
 Status workflow: scanned → identified → transcoded → ready
 
+`series_positions` tracks where each channel is in a series' episode list. `group_key` is the `series_name` for shows, or `"standalone_{content_id}"` for movies.
+
 ## Running
 
 ```bash
-cd C:\Users\Aaron\Documents\CableTV_Sim\app
+cd L:\CableTV_Sim\app
 python -m cabletv start           # Full system
 python -m cabletv start --windowed
 python -m cabletv stats
@@ -125,7 +155,7 @@ When the user adds new video files and wants them ingested, follow this workflow
 #### Step 1: Scan
 
 ```bash
-cd C:\Users\Aaron\Documents\CableTV_Sim\app
+cd L:\CableTV_Sim\app
 python -m cabletv ingest scan
 ```
 
@@ -323,7 +353,7 @@ Music videos work differently from regular content at every stage.
 | **AI identify** | TMDB tool use, extracts series/season/episode | No TMDB, extracts artist/title/year from filename |
 | **DB field** | `series_name`, `season`, `episode` | `artist` (new column) |
 | **Tags** | 2-3 genre tags (+ "classic" bonus for pre-1980s) | Always and only `"music"` |
-| **Schedule** | Slot-based (30min grid), one item per slot | Continuous playlist — loops shuffled pool, multiple videos per slot |
+| **Schedule** | Slot-based (30min grid), two-tier selection | Continuous playlist — loops shuffled pool, multiple videos per slot |
 | **Commercials** | Fill remaining slot time | None (`commercial_ratio: 0.0`) |
 | **OSD** | Channel number + name for 2s | Artist / title / year for 5s at start AND 5s before end |
 | **Break points** | Black frame detection | Not needed (skip analyze) |
@@ -364,40 +394,63 @@ python -m cabletv content edit <id> --type music --tags "music"  # Fix misdetect
 python -m cabletv content list --type music                    # List music content
 ```
 
-### Files Involved
+## Guide Channel (Ch14 — Preview Channel)
 
-- `schedule/engine.py` — `_what_is_on_continuous()` method, `ScheduleEntry.artist`/`.year` fields
-- `playback/engine.py` — `_show_music_osd()`, `_music_end_timer`
-- `ingest/scanner.py` — music detection in `detect_content_type()`
-- `ingest/ai_identifier.py` — `MUSIC_SYSTEM_PROMPT`, music batch routing
-- `db.py` — `artist` column, `'music'` in content_type CHECK, migration in `_run_migrations()`
+Prevue-style scrolling grid channel with promo clips.
+
+### How It Works
+
+- `guide/generator.py` runs in background, rendering video segments
+- `guide/renderer.py` draws the scrolling grid using Pillow (channel names, times, programs)
+- `guide/promos.py` selects promo clips to play in the upper portion
+- Segments are pre-rendered to `guide/` directory and played by mpv with loop
+- Playback engine polls every 5 seconds for new segments
+
+### Config (config.yaml)
+
+```yaml
+guide:
+  enabled: true
+  channel_number: 14
+  promo_duration: 20
+  scroll_speed: 3.0
+  segment_duration: 600
+  regenerate_interval: 600
+  fps: 15
+```
+
+### CLI
+
+```bash
+python -m cabletv guide generate [--short]    # Generate guide segments manually
+```
 
 ## Implementation Status
 
 ### Complete
 - Deterministic schedule engine with timeline-based commercial breaks
+- Two-tier content selection (equal weight per series/title, not per episode)
+- Sequential episode ordering with DB-persisted positions
 - 5-stage ingest pipeline (scan, identify, transcode, analyze, register)
 - AI-powered content identification (Claude API + TMDB tool use)
 - Smart commercial selection (fits duration, handles gaps)
-- Variable info bumpers (mini-guide OSD in commercial gaps >= 3s)
+- Info bumpers (mini-guide OSD in every commercial break, 5-8s)
 - mpv playback with segment transitions (content, commercial, info bumper)
 - Web remote control
-- 25 channels configured (real cable names: MTV, Comedy Central, Sci-Fi Channel, HBO, Disney Channel, etc.)
+- 25 channels configured (24 content + 1 guide; real cable names: MTV, Comedy Central, Sci-Fi Channel, HBO, Disney Channel, etc.)
 - Content edit/reset CLI commands for fixing misidentifications
 - Music video channel (Ch25 — MTV) with continuous playlist, artist OSD, no commercials
+- Guide channel (Ch14 — Preview Channel) with Prevue-style scrolling grid + promo clips
 - "Classic" bonus tag auto-assigned by AI for pre-1980s content
 - "Disney" bonus tag auto-assigned by AI for Disney/Pixar content
 
 ### Not Implemented
-- Guide channel (Prevue-style scrolling grid)
 - GPIO/IR input on Pi
 - Standby video (currently OSD text only)
-- Promo bumpers ("Tonight at 7:30...") - foundation exists via `what_is_on(channel, when)`
 
 ## Known Limitations
 
-1. **100-slot lookback limit** - Content >50 hours may not schedule correctly (walks back max 100 slots)
-2. **Callbacks fired inside lock** - Don't call `tune_to()` from callbacks (deadlock risk)
+1. **Callbacks fired inside lock** - Don't call `tune_to()` from callbacks (deadlock risk)
 
 ## CRITICAL Rules for Database Changes
 
@@ -416,5 +469,4 @@ Before ANY schema change:
 1. **Content not showing**: Check tags match channel config
 2. **mpv won't start**: Verify mpv in PATH
 3. **Schedule seems wrong**: Remember it's deterministic - same time = same content
-4. **Commercials cut off**: Fixed - now uses smart fitting algorithm
-5. **Info bumper not showing**: Only displays when gap is >= 3 seconds
+4. **Info bumper not showing**: Only displays when gap is >= 3 seconds
