@@ -454,7 +454,7 @@ class GuideGenerator:
             pd = gc.promo_duration          # 20s per clip
             cycle = pd * 2                  # 40s full cycle
             fade = 1.5                      # fade transition duration
-            low, high = 0.15, 0.5           # volume levels
+            low, high = 0.0, 0.5            # volume levels
             delta = high - low              # 0.35
             fu = pd - fade                  # fade-up starts before gap
             fd = cycle - fade               # fade-down starts before promo

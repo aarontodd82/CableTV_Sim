@@ -29,6 +29,8 @@ class TimelineSegment:
     content_seek_start: float = 0.0  # Where to seek in content file
     # For commercial segments:
     break_index: int = 0  # Which break this is (for deterministic commercial selection)
+    # For multi-episode packing: which episode in the pack (0-based)
+    content_index: int = 0
 
 
 @dataclass
@@ -178,6 +180,123 @@ def build_content_timeline(
     return segments
 
 
+def build_multi_episode_timeline(
+    episodes: list[tuple[float, list[float]]],
+    total_slot_duration: float,
+    seed: int = 0
+) -> list[TimelineSegment]:
+    """
+    Build a timeline for multiple short episodes packed into one slot.
+
+    Interleaves full episodes with commercial breaks between them, plus
+    end-of-slot padding. Commercial time is distributed evenly across all
+    inter-episode gaps and the end padding. Each content segment is tagged
+    with content_index to identify which episode's file to play.
+
+    For episodes with internal break points, those are respected as additional
+    intra-episode breaks.
+
+    Args:
+        episodes: List of (duration, break_points) per episode
+        total_slot_duration: Total duration of the slot allocation
+        seed: Seed for deterministic info bumper placement
+
+    Returns:
+        List of TimelineSegment objects covering the entire slot duration
+    """
+    total_content_time = sum(dur for dur, _ in episodes)
+    total_commercial_time = total_slot_duration - total_content_time
+
+    # Count all breaks: internal break points within each episode + gaps between
+    # episodes + end padding
+    all_break_slots = 0
+    for ep_idx, (ep_dur, ep_breaks) in enumerate(episodes):
+        valid_breaks = [bp for bp in ep_breaks if 0 < bp < ep_dur]
+        all_break_slots += len(valid_breaks)
+    # Inter-episode gaps (one between each pair of adjacent episodes)
+    inter_episode_gaps = len(episodes) - 1
+    # Plus end-of-slot padding
+    all_break_slots += inter_episode_gaps + 1
+
+    commercial_per_break = total_commercial_time / all_break_slots if all_break_slots > 0 else 0
+
+    # Info bumper sizing (same logic as single-episode)
+    bumper_duration = 0.0
+    if commercial_per_break >= INFO_BUMPER_MIN:
+        bumper_duration = min(INFO_BUMPER_MAX, commercial_per_break / 2)
+        bumper_duration = max(INFO_BUMPER_MIN, bumper_duration)
+        bumper_duration = min(bumper_duration, commercial_per_break)
+
+    segments: list[TimelineSegment] = []
+    current_offset = 0.0
+    break_counter = 0  # Global break index for deterministic commercial selection
+
+    def _add_break():
+        nonlocal current_offset, break_counter
+        if commercial_per_break <= 0:
+            return
+        comm_dur = commercial_per_break
+        if bumper_duration > 0:
+            comm_dur -= bumper_duration
+        if comm_dur > 0:
+            segments.append(TimelineSegment(
+                segment_type="commercial",
+                start_offset=current_offset,
+                duration=comm_dur,
+                break_index=break_counter,
+            ))
+            current_offset += comm_dur
+        if bumper_duration > 0:
+            segments.append(TimelineSegment(
+                segment_type="info_bumper",
+                start_offset=current_offset,
+                duration=bumper_duration,
+                break_index=break_counter,
+            ))
+            current_offset += bumper_duration
+        break_counter += 1
+
+    for ep_idx, (ep_dur, ep_breaks) in enumerate(episodes):
+        valid_breaks = sorted([bp for bp in ep_breaks if 0 < bp < ep_dur])
+        content_position = 0.0
+
+        # Content segments with intra-episode breaks
+        for bp in valid_breaks:
+            seg_dur = bp - content_position
+            if seg_dur > 0:
+                segments.append(TimelineSegment(
+                    segment_type="content",
+                    start_offset=current_offset,
+                    duration=seg_dur,
+                    content_seek_start=content_position,
+                    content_index=ep_idx,
+                ))
+                current_offset += seg_dur
+            _add_break()
+            content_position = bp
+
+        # Final segment of this episode
+        final_dur = ep_dur - content_position
+        if final_dur > 0:
+            segments.append(TimelineSegment(
+                segment_type="content",
+                start_offset=current_offset,
+                duration=final_dur,
+                content_seek_start=content_position,
+                content_index=ep_idx,
+            ))
+            current_offset += final_dur
+
+        # Inter-episode break (not after the last episode)
+        if ep_idx < len(episodes) - 1:
+            _add_break()
+
+    # End-of-slot padding
+    _add_break()
+
+    return segments
+
+
 def find_current_segment(
     segments: list[TimelineSegment],
     elapsed: float
@@ -218,6 +337,8 @@ class ScheduleEntry:
     series_name: Optional[str] = None
     season: Optional[int] = None
     episode: Optional[int] = None
+    # Multi-episode packing: list of (content_id, file_path, duration) for all episodes
+    packed_episodes: Optional[list[tuple[int, str, float]]] = None
 
     @property
     def is_playing(self) -> bool:
@@ -256,6 +377,7 @@ class NowPlaying:
     is_commercial: bool = False
     commercial: Optional[CommercialEntry] = None
     is_end_bumper: bool = False
+    pack_count: int = 1  # Number of episodes in a packed block (for position advancement)
 
     @property
     def slot_remaining_seconds(self) -> float:
@@ -401,19 +523,33 @@ class ScheduleEngine:
         self._positions[key] = initial
         return initial
 
-    def advance_position(self, channel_number: int, group_key: str, num_items: int) -> None:
-        """Advance the episode position for a group on a channel and persist to DB."""
+    def advance_position(self, channel_number: int, group_key: str, num_items: int,
+                         preserve_block_start: Optional[int] = None,
+                         advance_by: int = 1) -> None:
+        """Advance the episode position for a group on a channel and persist to DB.
+
+        Args:
+            preserve_block_start: If set, preserve block cache entries whose
+                block starts at this slot.  This protects the currently-playing
+                block from cache invalidation so that re-tuning mid-slot
+                returns the same content instead of skipping ahead.
+            advance_by: Number of positions to advance (default 1). Used by
+                multi-episode packing to skip past all packed episodes at once.
+        """
         key = (channel_number, group_key)
         current = self._positions.get(key, 0)
-        new_pos = (current + 1) % num_items
+        new_pos = (current + advance_by) % num_items
         self._positions[key] = new_pos
         with db_connection() as conn:
             set_series_position(conn, channel_number, group_key, new_pos)
         # Invalidate cached block selections for this channel — future slots
-        # may now select a different episode with the updated position
+        # may now select a different episode with the updated position.
+        # Preserve the currently-playing block so re-tuning mid-slot returns
+        # the same content instead of skipping to the next episode.
         self._block_cache = {
             k: v for k, v in self._block_cache.items()
             if k[0] != channel_number
+            or (preserve_block_start is not None and v[0] == preserve_block_start)
         }
 
     def _get_show_weight(self, slot_number: int,
@@ -699,6 +835,54 @@ class ScheduleEngine:
 
         return None
 
+    def _get_packed_episodes(
+        self,
+        channel_config: ChannelConfig,
+        group: ContentGroup,
+        start_position: int,
+        total_slot_duration: float,
+    ) -> list[dict]:
+        """
+        Greedily pack sequential episodes from a group into a slot.
+
+        Starts from start_position and adds episodes as long as the total
+        content fits within ~80% of the slot (leaving room for commercials).
+        Caps at 5 episodes max. Wraps around using modular arithmetic.
+
+        Args:
+            channel_config: Channel configuration
+            group: The content group to pack from
+            start_position: Starting episode index in the group
+            total_slot_duration: Total slot time available
+
+        Returns:
+            List of content dicts for the packed episodes (at least 2, or
+            empty if packing isn't beneficial)
+        """
+        max_content_time = total_slot_duration * 0.80
+        max_episodes = 5
+        items = group.items
+
+        packed = []
+        accumulated_duration = 0.0
+
+        for i in range(max_episodes):
+            idx = (start_position + i) % len(items)
+            ep = items[idx]
+            ep_dur = ep["duration_seconds"]
+
+            if accumulated_duration + ep_dur > max_content_time:
+                break
+
+            packed.append(ep)
+            accumulated_duration += ep_dur
+
+        # Only pack if we got at least 2 episodes
+        if len(packed) < 2:
+            return []
+
+        return packed
+
     def what_is_on(
         self,
         channel_number: int,
@@ -757,17 +941,69 @@ class ScheduleEngine:
         total_slot_duration = slot_breakdown["total_slot_duration"]
         slot_end_time = block_start_time + timedelta(seconds=total_slot_duration)
 
-        # Get break points for this content
-        break_points = self._get_content_break_points(content["id"])
+        # --- Multi-episode packing ---
+        # Check if this content is short enough to pack multiple episodes.
+        # Requirements: has a series_name, single-slot content, and at least
+        # 2 episodes would fit in the slot.
+        packed_episodes = []
+        pack_count = 1
+        num_slots = slots_needed(content_duration, self.slot_duration)
 
-        # Build the complete timeline for this content block
+        if (content.get("series_name")
+                and num_slots == 1
+                and 2 * content_duration <= total_slot_duration):
+            # Find the group this content belongs to
+            groups = self.get_channel_groups(channel_config)
+            group = None
+            for g in groups:
+                if g.group_key == content["series_name"]:
+                    group = g
+                    break
+
+            if group and len(group.items) >= 2:
+                pos = self._get_position(channel_number, group)
+                packed = self._get_packed_episodes(
+                    channel_config, group, pos, total_slot_duration)
+                if len(packed) >= 2:
+                    packed_episodes = packed
+                    pack_count = len(packed)
+
+        # Build timeline — multi-episode or single-episode
         timeline_seed = self._get_channel_seed(channel_number, block_start_slot)
-        timeline = build_content_timeline(
-            content_duration=content_duration,
-            break_points=break_points,
-            total_slot_duration=total_slot_duration,
-            seed=timeline_seed
-        )
+
+        if packed_episodes:
+            # Multi-episode: gather break points for each episode
+            episodes_data = []
+            for ep in packed_episodes:
+                ep_breaks = self._get_content_break_points(ep["id"])
+                episodes_data.append((ep["duration_seconds"], ep_breaks))
+
+            timeline = build_multi_episode_timeline(
+                episodes=episodes_data,
+                total_slot_duration=total_slot_duration,
+                seed=timeline_seed,
+            )
+
+            # Total content duration for the pack
+            total_pack_duration = sum(ep["duration_seconds"] for ep in packed_episodes)
+
+            # Build packed_episodes tuple list for ScheduleEntry
+            packed_ep_tuples = [
+                (ep["id"],
+                 ep.get("normalized_path") or ep.get("original_path", ""),
+                 ep["duration_seconds"])
+                for ep in packed_episodes
+            ]
+        else:
+            # Single-episode: original behavior
+            break_points = self._get_content_break_points(content["id"])
+            timeline = build_content_timeline(
+                content_duration=content_duration,
+                break_points=break_points,
+                total_slot_duration=total_slot_duration,
+                seed=timeline_seed,
+            )
+            packed_ep_tuples = None
 
         # Calculate elapsed time since content block started
         elapsed = (when - block_start_time).total_seconds()
@@ -779,11 +1015,24 @@ class ScheduleEngine:
             # Past the end of the slot - shouldn't happen but handle gracefully
             return None
 
-        # Get file path for main content
-        file_path = content.get("normalized_path") or content.get("original_path", "")
+        # Resolve file path based on content_index for packed episodes
+        if packed_episodes and current_segment.segment_type == "content":
+            active_ep = packed_episodes[current_segment.content_index]
+            file_path = active_ep.get("normalized_path") or active_ep.get("original_path", "")
+            active_content_id = active_ep["id"]
+            active_title = active_ep["title"]
+            active_duration = active_ep["duration_seconds"]
+        else:
+            file_path = content.get("normalized_path") or content.get("original_path", "")
+            active_content_id = content["id"]
+            active_title = content["title"]
+            active_duration = content_duration
 
         # Calculate when the main content would naturally end (without commercials)
-        content_end_time = block_start_time + timedelta(seconds=content_duration)
+        if packed_episodes:
+            content_end_time = block_start_time + timedelta(seconds=total_pack_duration)
+        else:
+            content_end_time = block_start_time + timedelta(seconds=content_duration)
 
         entry = ScheduleEntry(
             content_id=content["id"],
@@ -798,6 +1047,7 @@ class ScheduleEngine:
             series_name=content.get("series_name"),
             season=content.get("season"),
             episode=content.get("episode"),
+            packed_episodes=packed_ep_tuples,
         )
 
         if current_segment.segment_type == "content":
@@ -812,13 +1062,17 @@ class ScheduleEngine:
                 seek_position=seek_position,
                 is_commercial=False,
                 commercial=None,
+                pack_count=pack_count,
             )
         elif current_segment.segment_type == "info_bumper":
             # Info bumper — black screen with mini-guide
             remaining_in_segment = current_segment.duration - offset_in_segment
-            # Detect if this is the end-of-slot bumper (after all content has played)
-            valid_break_count = len([bp for bp in break_points if 0 < bp < content_duration])
-            is_end = current_segment.break_index >= valid_break_count
+            # Detect if this is the end-of-slot bumper (last break_index in timeline)
+            max_break_idx = max(
+                (s.break_index for s in timeline
+                 if s.segment_type in ("commercial", "info_bumper")),
+                default=0)
+            is_end = current_segment.break_index >= max_break_idx
             return NowPlaying(
                 entry=entry,
                 elapsed_seconds=elapsed,
@@ -827,6 +1081,7 @@ class ScheduleEngine:
                 is_commercial=True,
                 commercial=None,  # Triggers info bumper display in playback engine
                 is_end_bumper=is_end,
+                pack_count=pack_count,
             )
         else:
             # We're in a commercial break
@@ -856,6 +1111,7 @@ class ScheduleEngine:
                         seek_position=0,
                         is_commercial=True,
                         commercial=None,  # Triggers standby display in playback engine
+                        pack_count=pack_count,
                     )
 
                 commercial_file_path = commercial_info.get("normalized_path") or commercial_info.get("original_path", "")
@@ -879,6 +1135,7 @@ class ScheduleEngine:
                     seek_position=commercial_info["seek_offset"],
                     is_commercial=True,
                     commercial=commercial_entry,
+                    pack_count=pack_count,
                 )
             else:
                 # No commercials available - return with no commercial to play
@@ -889,6 +1146,7 @@ class ScheduleEngine:
                     seek_position=0,
                     is_commercial=True,
                     commercial=None,
+                    pack_count=pack_count,
                 )
 
     def find_next_airing(
@@ -930,7 +1188,11 @@ class ScheduleEngine:
                 continue
 
             if content.get("series_name") == series_name:
-                return get_slot_start(block_start, self.epoch, self.slot_duration)
+                start_time = get_slot_start(block_start, self.epoch, self.slot_duration)
+                # Block may have started in the past (multi-slot content found
+                # partway through) — only return future airings.
+                if start_time > after_time:
+                    return start_time
 
             # Skip forward by content's slot span to avoid checking every slot
             num = slots_needed(content["duration_seconds"], self.slot_duration)
@@ -980,33 +1242,22 @@ class ScheduleEngine:
             current_time = walker_start
 
             while current_time < end_time:
+                # If the previous entry's slot block extends past this time,
+                # skip ahead.  Multi-slot content (movies) should display as
+                # one continuous block in the guide.  Without this, changing
+                # exclusion sets at slot boundaries can cause _find_block_start
+                # to return different content at each slot, fragmenting a
+                # 90-minute movie into 30-minute blocks.
+                if entries and entries[-1].slot_end_time > current_time:
+                    current_time += timedelta(minutes=self.slot_duration)
+                    continue
+
                 now_playing = self.what_is_on(channel_num, current_time)
                 if now_playing:
-                    # Detect whether this is truly the same ongoing block or
-                    # a new block that happens to have the same content_id
-                    # (e.g., same movie scheduled again by the RNG).
-                    same_block = (
-                        entries
-                        and entries[-1].content_id == now_playing.entry.content_id
-                        and entries[-1].slot_end_time > current_time
-                    )
-                    if not entries or not same_block:
-                        # Content changed (or same content in a new block)
-                        # — clip previous entry's end time
-                        if entries and entries[-1].slot_end_time > current_time:
-                            entries[-1].slot_end_time = current_time
-                        # Clip start_time: when exclusions change mid-block, the
-                        # block-start from what_is_on may precede the actual
-                        # switch point.  Use the time we discovered the change.
-                        entry = now_playing.entry
-                        if entry.start_time < current_time:
-                            entry = replace(entry, start_time=current_time)
-                        entries.append(entry)
-                else:
-                    # No content — clip previous entry if needed
-                    if entries and entries[-1].slot_end_time > current_time:
-                        entries[-1].slot_end_time = current_time
-                # Walk slot-by-slot to catch exclusion changes at boundaries
+                    entry = now_playing.entry
+                    if entry.start_time < current_time:
+                        entry = replace(entry, start_time=current_time)
+                    entries.append(entry)
                 current_time += timedelta(minutes=self.slot_duration)
 
             guide[channel_num] = entries

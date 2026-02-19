@@ -115,6 +115,16 @@ def api_channel_down():
     })
 
 
+@app.route("/api/info", methods=["POST"])
+def api_info():
+    """Show the 'next airing' info overlay on screen."""
+    if not _playback:
+        return jsonify({"error": "Playback engine not initialized"}), 500
+
+    shown = _playback.show_info_overlay()
+    return jsonify({"success": shown})
+
+
 @app.route("/api/channels")
 def api_channels():
     """Get list of available channels."""

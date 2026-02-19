@@ -10,6 +10,7 @@ from typing import Optional, Callable, TYPE_CHECKING
 from ..config import Config
 from ..platform import get_content_paths, get_drive_root
 from ..schedule.engine import ScheduleEngine, NowPlaying
+from ..utils.time_utils import get_slot_number
 from .mpv_control import MpvController
 
 if TYPE_CHECKING:
@@ -163,7 +164,15 @@ class PlaybackEngine:
                             if g.group_key == gk:
                                 group_size = len(g.items)
                                 break
-                    advance_info = (content_id, gk, group_size)
+                    # Calculate block start slot so advance_position can
+                    # preserve this block's cache entries (prevents re-tune
+                    # mid-slot from jumping to the next episode)
+                    block_start_slot = get_slot_number(
+                        entry.start_time,
+                        self.schedule.epoch,
+                        self.schedule.slot_duration)
+                    advance_info = (content_id, gk, group_size, block_start_slot,
+                                    now_playing.pack_count)
 
             if not now_playing:
                 self._current_channel = channel_number
@@ -194,9 +203,12 @@ class PlaybackEngine:
 
         # Advance series position outside the lock (DB I/O)
         if advance_info:
-            _, prev_group_key, prev_group_size = advance_info
+            _, prev_group_key, prev_group_size, block_start_slot, pack_count = advance_info
             try:
-                self.schedule.advance_position(channel_number, prev_group_key, prev_group_size)
+                self.schedule.advance_position(
+                    channel_number, prev_group_key, prev_group_size,
+                    preserve_block_start=block_start_slot,
+                    advance_by=pack_count)
             except Exception as e:
                 print(f"Error advancing series position: {e}")
 
@@ -234,7 +246,10 @@ class PlaybackEngine:
                 self._show_channel_osd(channel_number, now_playing)
 
                 # Schedule "next episode" bumper for shows in their last content segment
-                if (now_playing.entry.content_type == "show"
+                # (disabled for multi-episode packed blocks — inter-episode breaks
+                # already have info bumpers showing what's coming up)
+                if (now_playing.pack_count == 1
+                        and now_playing.entry.content_type == "show"
                         and now_playing.entry.series_name
                         and now_playing.remaining_seconds > 3):
                     # Check if this is the last content segment:
@@ -461,7 +476,7 @@ class PlaybackEngine:
             return
         print(f"  [BUMPER DEBUG] Showing overlay: {entry.series_name} next at {next_time}")
 
-        # Format day: "Today", "Tomorrow", or weekday name
+        # Format day + time
         today = datetime.now().date()
         next_date = next_time.date()
         delta_days = (next_date - today).days
@@ -476,18 +491,41 @@ class PlaybackEngine:
         time_str = next_time.strftime("%I:%M %p").lstrip("0")  # "7:30 PM"
 
         series = entry.series_name
+        ch_config = self.config.channel_map.get(entry.channel_number)
+        ch_name = ch_config.name if ch_config else f"Channel {entry.channel_number}"
 
-        # ASS override tags for styled bottom-center bumper:
-        # \an2 = bottom-center, \bord6 = thick border (acts as background),
-        # \3c&H000000& = black border color, \3a&H80& = semi-transparent border,
-        # \1c&HFFFFFF& = white text, \shad0 = no shadow
-        bumper_text = (
-            r"{\an2\bord6\3c&H000000&\3a&H80&\1c&HFFFFFF&\shad0"
-            r"\b1\fs20}" + series +
-            r"{\b0\fs18}\N" + day_str + " at " + time_str
+        # Lower-third overlay: semi-transparent black box + white text (2 lines)
+        # Two ASS events: \an7 (top-left) box drawing, \an5 (center) text.
+        # Overscan compensation keeps the bar inside the visible area.
+        overscan = self.config.playback.overscan
+        m = overscan / 100.0 if overscan > 0 else 0.0
+        vis_w = 640 * (1 - 2 * m)
+        vis_h = 480 * (1 - 2 * m)
+        left = int(m * 640)
+        bottom = int(m * 480 + vis_h)
+
+        box_h = 60
+        box_top = bottom - box_h
+        box_w = int(vis_w)
+
+        # \an7 + \p1: top-left anchored rectangle spanning visible width
+        box_event = (
+            r"{\an7\pos(" + str(left) + "," + str(box_top) + r")"
+            r"\p1\bord0\shad0\1c&H000000&\1a&H80&}"
+            f"m 0 0 l {box_w} 0 {box_w} {box_h} 0 {box_h}"
         )
+        # \an5: centered in the box, two lines
+        text_cx = 320
+        text_cy = box_top + box_h // 2
+        text_event = (
+            r"{\an5\pos(" + str(text_cx) + "," + str(text_cy) + r")"
+            r"\bord0\shad0\1c&HFFFFFF&\fs18}"
+            f"Catch {series} next on {ch_name}\\N{day_str} at {time_str}"
+        )
+        bumper_text = box_event + "\n" + text_event
 
-        result = self.mpv.show_osd_overlay(self._NEXT_EP_OVERLAY_ID, bumper_text)
+        result = self.mpv.show_osd_overlay(
+            self._NEXT_EP_OVERLAY_ID, bumper_text, res_x=640, res_y=480)
         print(f"  [BUMPER DEBUG] show_osd_overlay returned: {result}")
 
         # Auto-remove after duration (mid-show bumper), or persist until
@@ -497,6 +535,24 @@ class PlaybackEngine:
                                     args=[now_playing])
             timer.daemon = True
             timer.start()
+
+    def show_info_overlay(self) -> bool:
+        """Show the 'next airing' lower-third on demand (triggered by remote).
+
+        Returns True if the overlay was shown, False if nothing to show.
+        """
+        with self._lock:
+            now_playing = self._current_playing
+            channel = self._current_channel
+
+        if (not now_playing
+                or now_playing.is_commercial
+                or not now_playing.entry.series_name):
+            return False
+
+        # Show for 5 seconds then auto-remove
+        self._show_next_episode_bumper(now_playing, duration=5.0)
+        return True
 
     def _remove_next_ep_overlay(self, now_playing: NowPlaying) -> None:
         """Remove the next-episode overlay if still on the same content."""

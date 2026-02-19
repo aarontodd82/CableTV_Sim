@@ -22,6 +22,9 @@ class RemoteControl {
         // Enter/Go button
         document.getElementById('btn-enter').addEventListener('click', () => this.enterChannel());
 
+        // Info button
+        document.getElementById('btn-info').addEventListener('click', () => this.showInfo());
+
         // Keyboard support
         document.addEventListener('keydown', (e) => this.handleKeyboard(e));
 
@@ -53,6 +56,10 @@ class RemoteControl {
         if (result && result.success) {
             this.updateStatus();
         }
+    }
+
+    async showInfo() {
+        await this.apiCall('/api/info', 'POST');
     }
 
     async tuneToChannel(channel) {
@@ -115,6 +122,11 @@ class RemoteControl {
             case 'Enter':
                 e.preventDefault();
                 this.enterChannel();
+                break;
+            case 'i':
+            case 'I':
+                e.preventDefault();
+                this.showInfo();
                 break;
         }
     }
