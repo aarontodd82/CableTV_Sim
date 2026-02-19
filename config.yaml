@@ -87,7 +87,7 @@ channels:
 
   - number: 27
     name: "Discovery Channel"
-    tags: ["documentary", "educational", "history"]
+    tags: ["documentary", "educational"]
     content_types: ["show", "movie"]
 
   - number: 28
@@ -100,6 +100,11 @@ channels:
     name: "AMC"
     tags: ["classic", "action", "drama"]
     content_types: ["movie"]
+
+  - number: 33
+    name: "History Channel"
+    tags: ["documentary", "history"]
+    content_types: ["show", "movie"]
 
   - number: 34
     name: "TV Land"

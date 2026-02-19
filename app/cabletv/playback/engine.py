@@ -25,9 +25,11 @@ class PlaybackEngine:
     Manages channel switching, content scheduling, and mpv control.
     """
 
-    def __init__(self, config: Config, schedule_engine: ScheduleEngine):
+    def __init__(self, config: Config, schedule_engine: ScheduleEngine,
+                 content_root: Optional[Path] = None):
         self.config = config
         self.schedule = schedule_engine
+        self._content_root = content_root or get_drive_root()
         self.mpv = MpvController(config)
         self._current_channel: Optional[int] = None
         self._current_playing: Optional[NowPlaying] = None
@@ -179,7 +181,7 @@ class PlaybackEngine:
                 self._current_playing = None
                 play_action = "no_content"
             else:
-                root = get_drive_root()
+                root = self._content_root
 
                 if now_playing.is_commercial and now_playing.commercial:
                     file_path = root / now_playing.commercial.file_path

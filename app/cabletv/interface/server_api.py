@@ -1,0 +1,92 @@
+"""Server API endpoints for remote clients."""
+
+from flask import Blueprint, jsonify, request
+from typing import Optional
+
+from ..config import Config
+from ..schedule.server_manager import ServerScheduleManager
+
+server_bp = Blueprint("server", __name__)
+
+# Set by register_server_api()
+_server_manager: Optional[ServerScheduleManager] = None
+_config: Optional[Config] = None
+
+
+def register_server_api(app, config: Config, server_manager: ServerScheduleManager):
+    """Register server API blueprint with the Flask app."""
+    global _server_manager, _config
+    _server_manager = server_manager
+    _config = config
+    app.register_blueprint(server_bp)
+
+
+@server_bp.route("/api/server/info")
+def server_info():
+    """Return server info needed by remote clients to sync schedules."""
+    if not _server_manager or not _config:
+        return jsonify({"error": "Server not initialized"}), 500
+
+    channels = [
+        {
+            "number": ch.number,
+            "name": ch.name,
+            "tags": ch.tags,
+            "content_types": ch.content_types,
+            "commercial_ratio": ch.commercial_ratio,
+        }
+        for ch in _config.channels
+    ]
+
+    return jsonify({
+        "seed": _server_manager.seed,
+        "epoch": _config.schedule.epoch,
+        "slot_duration": _config.schedule.slot_duration,
+        "channels": channels,
+        "guide": {
+            "enabled": _config.guide.enabled,
+            "channel_number": _config.guide.channel_number,
+        },
+        "weather": {
+            "enabled": _config.weather.enabled,
+            "channel_number": _config.weather.channel_number,
+        },
+    })
+
+
+@server_bp.route("/api/server/advance", methods=["POST"])
+def server_advance():
+    """Advance a series position (consumed-slot tracking prevents double-advance)."""
+    if not _server_manager:
+        return jsonify({"error": "Server not initialized"}), 500
+
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "JSON body required"}), 400
+
+    try:
+        advanced = _server_manager.try_advance(
+            channel_number=data["channel_number"],
+            group_key=data["group_key"],
+            num_items=data["num_items"],
+            block_start_slot=data["block_start_slot"],
+            advance_by=data.get("advance_by", 1),
+            content_id=data.get("content_id", 0),
+        )
+    except KeyError as e:
+        return jsonify({"error": f"Missing field: {e}"}), 400
+
+    return jsonify({
+        "advanced": advanced,
+        "seed": _server_manager.seed,
+    })
+
+
+@server_bp.route("/api/server/positions")
+def server_positions():
+    """Return all series positions for remote clients."""
+    if not _server_manager:
+        return jsonify({"error": "Server not initialized"}), 500
+
+    positions = _server_manager.get_all_positions()
+    return jsonify({"positions": positions})

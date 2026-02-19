@@ -529,10 +529,9 @@ class ScheduleEngine:
         """Advance the episode position for a group on a channel and persist to DB.
 
         Args:
-            preserve_block_start: If set, preserve block cache entries whose
-                block starts at this slot.  This protects the currently-playing
-                block from cache invalidation so that re-tuning mid-slot
-                returns the same content instead of skipping ahead.
+            preserve_block_start: Unused (kept for API compat). Previously
+                controlled which cache entries to preserve during invalidation,
+                but the block cache is no longer cleared on advance.
             advance_by: Number of positions to advance (default 1). Used by
                 multi-episode packing to skip past all packed episodes at once.
         """
@@ -542,15 +541,14 @@ class ScheduleEngine:
         self._positions[key] = new_pos
         with db_connection() as conn:
             set_series_position(conn, channel_number, group_key, new_pos)
-        # Invalidate cached block selections for this channel — future slots
-        # may now select a different episode with the updated position.
-        # Preserve the currently-playing block so re-tuning mid-slot returns
-        # the same content instead of skipping to the next episode.
-        self._block_cache = {
-            k: v for k, v in self._block_cache.items()
-            if k[0] != channel_number
-            or (preserve_block_start is not None and v[0] == preserve_block_start)
-        }
+        # NOTE: We intentionally do NOT clear the block cache here.
+        # Clearing the cache after a position advance causes walk-forward
+        # cascade instability: shows with variable episode durations (e.g.
+        # Saved by the Bell 22min vs 93min special) change the slot layout
+        # when the walk recalculates with the new position, causing movies
+        # to appear to start many slots in the past with a deep seek offset.
+        # Keeping the cache preserves schedule consistency — the bumper's
+        # "up next" prediction matches the actual transition.
 
     def _get_show_weight(self, slot_number: int,
                          channel_num: int,
@@ -682,12 +680,11 @@ class ScheduleEngine:
         is aligned so that nearby target_slots always walk from the same
         starting point, producing consistent content assignments.
 
-        Results are cached per (channel, target_slot) so that position
-        advances mid-block don't change what's already playing. The cache
-        lives at this level (not _select_content_for_slot) because the
-        exclusion set for a given (channel, slot) is deterministic, while
-        intermediate walk slots can be visited with different exclusion
-        contexts by different callers.
+        All blocks visited during the walk are cached (not just the target).
+        Future walks that hit a cached intermediate slot reuse it, ensuring
+        the cascade stays consistent even when episode positions change
+        between queries. This prevents movies from appearing to start many
+        slots in the past after a position advance changes the walk cascade.
 
         Args:
             channel_config: Channel config
@@ -713,6 +710,25 @@ class ScheduleEngine:
 
         current_slot = search_start
         while current_slot <= target_slot:
+            # Check if this intermediate slot was already resolved by a
+            # previous walk.  Reusing cached intermediates keeps the cascade
+            # stable across queries even when positions change between them.
+            inter_key = (channel_config.number, current_slot)
+            inter_cached = self._block_cache.get(inter_key)
+            if inter_cached is not None:
+                cached_start, cached_content = inter_cached
+                if cached_content:
+                    num_slots = slots_needed(
+                        cached_content["duration_seconds"], self.slot_duration)
+                    end_slot = cached_start + num_slots
+                    if end_slot > target_slot:
+                        # Cached block covers the target slot
+                        self._block_cache[cache_key] = (cached_start, cached_content)
+                        return cached_start, cached_content
+                    # Skip past this cached block
+                    current_slot = end_slot
+                    continue
+
             content = self._select_content_for_slot(
                 channel_config, current_slot, exclude_ids=exclude_ids)
             if not content:
@@ -721,6 +737,13 @@ class ScheduleEngine:
 
             num_slots = slots_needed(content["duration_seconds"], self.slot_duration)
             end_slot = current_slot + num_slots  # exclusive
+
+            # Cache every block we visit so future walks reuse the same
+            # cascade decisions (prevents position-advance instability).
+            for s in range(current_slot, min(end_slot, target_slot + 1)):
+                s_key = (channel_config.number, s)
+                if s_key not in self._block_cache:
+                    self._block_cache[s_key] = (current_slot, content)
 
             if end_slot > target_slot:
                 # This content spans to cover target_slot

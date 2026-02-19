@@ -18,8 +18,10 @@ guide/               → Generated guide video segments
 
 app/cabletv/
 ├── schedule/
-│   ├── engine.py        → Timeline building, what_is_on(), two-tier selection
-│   └── commercials.py   → Commercial selection, slot breakdown
+│   ├── engine.py           → Timeline building, what_is_on(), two-tier selection
+│   ├── commercials.py      → Commercial selection, slot breakdown
+│   ├── server_manager.py   → Consumed-slot tracking for server mode
+│   └── remote_provider.py  → ScheduleEngine subclass for remote mode
 ├── playback/
 │   ├── engine.py        → Channel switching, segment transitions, position advancement
 │   └── mpv_control.py   → mpv TCP IPC (port 9876)
@@ -27,8 +29,13 @@ app/cabletv/
 │   ├── generator.py     → Background guide segment generation
 │   ├── renderer.py      → Prevue-style scrolling grid (Pillow)
 │   └── promos.py        → Promo clip selection
+├── network/
+│   ├── discovery.py     → mDNS server advertisement + client discovery
+│   ├── client.py        → Server connection + API client
+│   ├── segment_provider.py → Read guide/weather segments from network share
+│   └── smb_instructions.py → First-run share setup instructions
 ├── ingest/              → 5-stage pipeline
-├── interface/           → Flask web API + remote UI
+├── interface/           → Flask web API + remote UI + server API
 └── utils/               → ffmpeg, time calculations
 ```
 
@@ -139,8 +146,11 @@ Status workflow: scanned → identified → transcoded → ready
 
 ```bash
 cd L:\CableTV_Sim\app
-python -m cabletv start           # Full system
-python -m cabletv start --windowed
+python -m cabletv start              # Full system (standalone, fullscreen)
+python -m cabletv start --windowed   # Standalone, windowed
+python -m cabletv start --server     # Server mode (headless — no video, just API + generators)
+python -m cabletv start --server -w  # Server + TV window
+python -m cabletv start --remote -w  # Remote client (discovers server, opens video window)
 python -m cabletv stats
 python -m cabletv schedule now
 python -m cabletv ingest all --skip-tmdb --skip-transcode --skip-analyze
@@ -329,6 +339,8 @@ There is no CLI for channel config. To add/change/remove channels, edit `config.
 
 `python -m cabletv start` is a **long-running blocking command** (starts mpv + web server). Run it in the background if needed, or warn the user it will block the terminal. Use `--windowed` for development/testing.
 
+`--server` runs headless (no mpv window) — web API + guide/weather generators only. Add `--windowed` to also open a video window. `--remote` requires `--windowed` to display video. See "Network Mode" section below for full details.
+
 ## IMPORTANT: Showing Output to the User
 
 **This applies to ALL cabletv CLI commands, not just ingest.**
@@ -493,6 +505,116 @@ weather:
 python -m cabletv weather generate    # Generate a weather segment for testing
 ```
 
+## Network Mode (Server/Remote)
+
+Allows multiple PCs on the same LAN to view the same broadcast — same channel, same time, same content, same seek position. One PC (server) has the content drive; others (remotes) access it over a network share.
+
+### Architecture
+
+```
+SERVER (--server):
+  Headless by default (no mpv window). Runs:
+  - Web server + API endpoints + mDNS advertisement
+  - Guide/weather segment generation
+  - ServerScheduleManager wraps ScheduleEngine with consumed-slot tracking
+  With --windowed: also opens mpv and acts as a TV (advances routed through ServerScheduleManager)
+
+REMOTE (--remote):
+  - Discovers server via mDNS (or manual server_url in config)
+  - Fetches server's seed at startup
+  - Opens cabletv.db from network share READ-ONLY
+  - Runs LOCAL ScheduleEngine with server's seed (zero-latency channel switching)
+  - Position advances go to server API (fire-and-forget with local fallback)
+  - Content files resolved via network share (content_root)
+  - Guide/weather segments read from network share via JSON sidecars (no local generation)
+  - Local mpv, local OSD, local web remote
+```
+
+### Key Files
+
+```
+app/cabletv/network/
+├── __init__.py           → Package init
+├── discovery.py          → mDNS advertisement (ServerAdvertiser) + discovery (ServerDiscoverer)
+├── client.py             → ServerConnection — connect to server, fetch info/positions
+├── segment_provider.py   → RemoteSegmentProvider — read guide/weather from share
+└── smb_instructions.py   → First-run network share setup instructions
+
+app/cabletv/schedule/
+├── server_manager.py     → ServerScheduleManager — consumed-slot tracking
+└── remote_provider.py    → RemoteScheduleProvider — ScheduleEngine with server's seed
+
+app/cabletv/interface/
+└── server_api.py         → Flask Blueprint: /api/server/info, /advance, /positions
+```
+
+### Config (config.yaml)
+
+```yaml
+network:
+  mode: standalone         # "standalone" | "server" | "remote"
+  server_url: ""           # Manual fallback: "http://192.168.1.100:5000"
+  content_root: ""         # Network share path for remote: "\\\\SERVER\\CableTV_Sim"
+  server_name: "CableTV Server"  # mDNS service name
+  discovery_timeout: 10    # Seconds to wait for mDNS discovery
+```
+
+### CLI
+
+```bash
+# Server — headless (no video window, just API + generators):
+python -m cabletv start --server
+
+# Server + TV — also opens a video window:
+python -m cabletv start --server --windowed
+
+# Remote (another PC on the LAN):
+python -m cabletv start --remote --windowed
+```
+
+CLI flags override `mode` in config.yaml.
+
+### Server Setup
+
+1. Run `python -m cabletv start --server` — headless, prints seed + SMB setup instructions on first run
+2. Share the CableTV_Sim folder as a network share (read-only for remotes)
+3. Server advertises via mDNS — remotes auto-discover it
+4. Optionally add `--windowed` if the server PC should also display video
+
+### Remote Setup
+
+1. Map/mount the server's network share
+2. Set `content_root` in config.yaml to the share path (e.g. `\\SERVER\CableTV_Sim`)
+3. Optionally set `server_url` if mDNS doesn't work (e.g. `http://192.168.1.100:5000`)
+4. Run `python -m cabletv start --remote --windowed`
+
+### Web Remote Control
+
+Each instance (server or remote) runs its own web server on port 5000. Connect to that machine's IP to control its TV:
+- Server at `10.2.0.2` → `http://10.2.0.2:5000` controls the server's TV (if `--windowed`)
+- Remote at `10.2.0.50` → `http://10.2.0.50:5000` controls that remote's TV
+
+The web remote only controls the local mpv. The only cross-network traffic is position advances.
+
+### How Broadcast Consistency Works
+
+- **Same content**: Deterministic from shared seed (remote uses server's seed)
+- **Same seek position**: Calculated from clock — `(now - block_start_time)`, NTP keeps clients in sync within ~1s
+- **Same episode**: Positions loaded from server, shared across all clients
+- **Position advances once**: `ServerScheduleManager` tracks consumed `(channel, block_start_slot)` pairs; first client to advance wins. Server's own playback (when `--windowed`) also routes through this, preventing double-advances.
+
+### Dependencies
+
+- **Server**: `pip install zeroconf` (for mDNS advertisement)
+- **Remote**: `pip install requests` (for server API calls). `zeroconf` is optional — needed for auto-discovery, not required if `server_url` is set manually in config.
+
+### Troubleshooting
+
+- **Remote can't find server**: Check both PCs are on same LAN subnet. Try setting `server_url` manually in config.yaml.
+- **Content won't play on remote**: Verify `content_root` path exists and contains `cabletv.db` and `content/` directory.
+- **Schedule mismatch**: Server restarts generate a new random seed. Restart remote clients after server restarts.
+- **Guide/weather not showing on remote**: Ensure `guide/` and `weather/` directories exist on the share. Server must be generating segments (JSON sidecars are written alongside each segment file).
+
 ## Implementation Status
 
 ### Complete
@@ -505,13 +627,14 @@ python -m cabletv weather generate    # Generate a weather segment for testing
 - Info bumpers (mini-guide OSD in every commercial break, 5-8s)
 - mpv playback with segment transitions (content, commercial, info bumper)
 - Web remote control
-- 26 channels configured (24 content + 1 guide + 1 weather; real cable names: MTV, Comedy Central, Sci-Fi Channel, HBO, Disney Channel, etc.)
+- 27 channels configured (25 content + 1 guide + 1 weather; real cable names: MTV, Comedy Central, Sci-Fi Channel, HBO, Disney Channel, etc.)
 - Content edit/reset CLI commands for fixing misidentifications
 - Music video channel (Ch25 — MTV) with continuous playlist, artist OSD, no commercials
 - Guide channel (Ch14 — Preview Channel) with Prevue-style scrolling grid + promo clips
 - Weather channel (Ch26 — The Weather Channel) with cycling data pages, scrolling ticker, radar
 - "Classic" bonus tag auto-assigned by AI for pre-1980s content
 - "Disney" bonus tag auto-assigned by AI for Disney/Pixar content
+- Network mode: server (headless or with window) / remote operation with mDNS discovery, shared seed, consumed-slot tracking, JSON segment sidecars
 
 ### Not Implemented
 - GPIO/IR input on Pi

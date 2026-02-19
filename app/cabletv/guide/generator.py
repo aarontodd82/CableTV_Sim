@@ -1,5 +1,6 @@
 """Background generator for TV Guide channel segments."""
 
+import json
 import shutil
 import subprocess
 import tempfile
@@ -256,6 +257,14 @@ class GuideGenerator:
             slot = self._next_slot
             output_path = self._output_dir / f"segment_{slot}.mp4"
             shutil.copy2(str(final_path), str(output_path))
+
+            # Write JSON sidecar for remote clients
+            sidecar_path = output_path.with_suffix(".json")
+            sidecar_data = {
+                "generation_time": target_time.isoformat(),
+                "duration": duration,
+            }
+            sidecar_path.write_text(json.dumps(sidecar_data), encoding="utf-8")
 
             with self._lock:
                 if swap_immediately:

@@ -97,6 +97,16 @@ class WeatherConfig:
 
 
 @dataclass
+class NetworkConfig:
+    """Network mode configuration for server/remote operation."""
+    mode: str = "standalone"       # "standalone" | "server" | "remote"
+    server_url: str = ""           # Manual fallback: "http://192.168.1.100:5000"
+    content_root: str = ""         # Network share path: "\\\\SERVER\\CableTV_Sim"
+    server_name: str = "CableTV Server"  # mDNS service name
+    discovery_timeout: int = 10    # Seconds to wait for mDNS
+
+
+@dataclass
 class Config:
     """Main configuration container."""
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
@@ -106,6 +116,7 @@ class Config:
     web: WebConfig = field(default_factory=WebConfig)
     guide: GuideConfig = field(default_factory=GuideConfig)
     weather: WeatherConfig = field(default_factory=WeatherConfig)
+    network: NetworkConfig = field(default_factory=NetworkConfig)
 
     @property
     def channel_map(self) -> dict[int, ChannelConfig]:
@@ -234,6 +245,17 @@ def load_config(config_path: Optional[Path] = None) -> Config:
             units=w.get("units", "imperial"),
         )
 
+    # Parse network settings
+    if "network" in data:
+        n = data["network"]
+        config.network = NetworkConfig(
+            mode=n.get("mode", "standalone"),
+            server_url=n.get("server_url", ""),
+            content_root=n.get("content_root", ""),
+            server_name=n.get("server_name", "CableTV Server"),
+            discovery_timeout=n.get("discovery_timeout", 10),
+        )
+
     return config
 
 
@@ -331,6 +353,16 @@ def save_config(config: Config, config_path: Optional[Path] = None) -> None:
             "units": config.weather.units,
         },
     }
+
+    # Only include network section if not standalone
+    if config.network.mode != "standalone" or config.network.server_url or config.network.content_root:
+        data["network"] = {
+            "mode": config.network.mode,
+            "server_url": config.network.server_url,
+            "content_root": config.network.content_root,
+            "server_name": config.network.server_name,
+            "discovery_timeout": config.network.discovery_timeout,
+        }
 
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)

@@ -12,9 +12,21 @@ from .platform import get_drive_root
 # Database schema version for migrations
 SCHEMA_VERSION = 1
 
+# Override for remote mode: when set, get_db_path() returns this path
+# instead of the default. Set by remote mode initialization.
+_remote_db_path: Optional[Path] = None
+
+
+def set_remote_db_path(path: Optional[Path]) -> None:
+    """Set the remote database path override."""
+    global _remote_db_path
+    _remote_db_path = path
+
 
 def get_db_path(root: Optional[Path] = None) -> Path:
     """Get path to the database file."""
+    if _remote_db_path is not None:
+        return _remote_db_path
     if root is None:
         root = get_drive_root()
     return root / "cabletv.db"
