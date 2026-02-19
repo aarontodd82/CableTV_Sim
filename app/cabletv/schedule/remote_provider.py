@@ -62,19 +62,22 @@ class RemoteScheduleProvider(ScheduleEngine):
     def advance_position(self, channel_number: int, group_key: str,
                          num_items: int, preserve_block_start: Optional[int] = None,
                          advance_by: int = 1) -> None:
-        """Advance locally and notify server (fire-and-forget)."""
-        # Update local cache (same math as parent, but skip DB write)
+        """Advance locally and notify server (fire-and-forget).
+
+        Updates only the in-memory position cache (no DB write — the
+        server is the source of truth). Block cache is intentionally
+        NOT cleared to preserve schedule consistency (see base class
+        advance_position comment).
+        """
+        # Update local position cache (same math as parent, skip DB write)
         key = (channel_number, group_key)
         current = self._positions.get(key, 0)
         new_pos = (current + advance_by) % num_items
         self._positions[key] = new_pos
 
-        # Invalidate block cache (same logic as parent)
-        self._block_cache = {
-            k: v for k, v in self._block_cache.items()
-            if k[0] != channel_number
-            or (preserve_block_start is not None and v[0] == preserve_block_start)
-        }
+        # NOTE: Block cache is NOT cleared here — same rationale as the
+        # base ScheduleEngine.advance_position. Clearing causes walk-forward
+        # cascade instability with variable-duration content.
 
         # Notify server (fire-and-forget)
         try:

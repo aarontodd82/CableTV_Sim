@@ -67,22 +67,16 @@ class CableTVSystem:
 
             # Route the server's own advances through ServerScheduleManager
             # so consumed-slot tracking works when server is also a TV
-            original_advance = self.schedule.advance_position
             def _server_advance(channel_number, group_key, num_items,
                                 preserve_block_start=None, advance_by=1):
                 slot = preserve_block_start or 0
-                if not self._server_manager.try_advance(
+                # try_advance returns False if already consumed by another
+                # client — in that case, do nothing. Block cache is
+                # intentionally NOT cleared (see ScheduleEngine.advance_position).
+                self._server_manager.try_advance(
                     channel_number, group_key, num_items, slot,
                     advance_by=advance_by,
-                ):
-                    # Already consumed — just invalidate local cache like
-                    # the normal advance would, but don't write to DB again
-                    self.schedule._block_cache = {
-                        k: v for k, v in self.schedule._block_cache.items()
-                        if k[0] != channel_number
-                        or (preserve_block_start is not None
-                            and v[0] == preserve_block_start)
-                    }
+                )
             self.schedule.advance_position = _server_advance
 
             # Show SMB share instructions on first run

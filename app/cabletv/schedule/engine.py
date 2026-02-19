@@ -382,10 +382,8 @@ class NowPlaying:
     @property
     def slot_remaining_seconds(self) -> float:
         """Seconds until the entire slot block ends (including commercials)."""
-        if self.is_commercial and self.commercial:
-            return self.remaining_seconds
-        else:
-            return self.remaining_seconds + self.entry.commercial_padding_seconds
+        total_slot = (self.entry.slot_end_time - self.entry.start_time).total_seconds()
+        return max(0.0, total_slot - self.elapsed_seconds)
 
 
 class ScheduleEngine:
@@ -408,6 +406,7 @@ class ScheduleEngine:
         self._positions_loaded = False
         self._block_cache: dict[tuple[int, int], tuple[int, dict]] = {}  # (channel, target_slot) -> (start_slot, content)
         self._type_avg_durations: dict[int, tuple[float, float]] = {}  # channel -> (avg_show, avg_movie)
+        self._break_point_cache: dict[int, list[float]] = {}  # content_id -> break points
 
     def _get_channel_seed(self, channel_number: int, slot_number: int) -> int:
         """Get deterministic seed for a specific channel and slot."""
@@ -490,11 +489,12 @@ class ScheduleEngine:
         return groups
 
     def clear_cache(self) -> None:
-        """Clear all caches (pool, group, block)."""
+        """Clear all caches (pool, group, block, break points)."""
         self._channel_pools.clear()
         self._channel_groups.clear()
         self._block_cache.clear()
         self._type_avg_durations.clear()
+        self._break_point_cache.clear()
 
     def _load_positions(self) -> None:
         """Lazy-load all series positions from the database."""
@@ -564,12 +564,17 @@ class ScheduleEngine:
         actual duration ratio, then applies a time-of-day modifier
         (more shows during daytime, more movies at night).
         """
-        # Get average durations per type (cached per channel)
+        # Get average durations per type (cached per channel).
+        # Averages all items across all groups for an accurate picture.
         if channel_num not in self._type_avg_durations:
-            avg_s = (sum(g.items[0]["duration_seconds"] for g in show_groups)
-                     / len(show_groups))
-            avg_m = (sum(g.items[0]["duration_seconds"] for g in movie_groups)
-                     / len(movie_groups))
+            show_total = sum(item["duration_seconds"]
+                             for g in show_groups for item in g.items)
+            show_count = sum(len(g.items) for g in show_groups)
+            movie_total = sum(item["duration_seconds"]
+                              for g in movie_groups for item in g.items)
+            movie_count = sum(len(g.items) for g in movie_groups)
+            avg_s = show_total / show_count
+            avg_m = movie_total / movie_count
             self._type_avg_durations[channel_num] = (avg_s, avg_m)
         avg_show, avg_movie = self._type_avg_durations[channel_num]
 
@@ -761,10 +766,14 @@ class ScheduleEngine:
         return result
 
     def _get_content_break_points(self, content_id: int) -> list[float]:
-        """Get break points for content from the database."""
+        """Get break points for content, cached after first lookup."""
+        if content_id in self._break_point_cache:
+            return self._break_point_cache[content_id]
         with db_connection() as conn:
             break_rows = get_break_points(conn, content_id)
-            return [row["timestamp_seconds"] for row in break_rows]
+            points = [row["timestamp_seconds"] for row in break_rows]
+        self._break_point_cache[content_id] = points
+        return points
 
     def _get_exclusions(self, channel_number: int, target_slot: int) -> set[int]:
         """

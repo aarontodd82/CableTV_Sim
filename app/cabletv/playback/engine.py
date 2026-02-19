@@ -44,6 +44,7 @@ class PlaybackEngine:
         self._guide_current_file: Optional[Path] = None
         self._weather_generator: Optional["WeatherGenerator"] = None
         self._weather_current_file: Optional[Path] = None
+        self._weather_clock_timer: Optional[threading.Timer] = None
         # Track which content has been "seen" per channel (content_id already advanced)
         self._seen_content: dict[int, int] = {}  # channel -> content_id
         self._bumper_bg_path: Optional[Path] = None
@@ -90,6 +91,15 @@ class PlaybackEngine:
 
         return True
 
+    def _cancel_all_timers(self) -> None:
+        """Cancel all pending timers. Must be called with self._lock held."""
+        for attr in ("_timer", "_music_end_timer", "_next_ep_timer",
+                      "_mid_ep_timer", "_weather_clock_timer"):
+            timer = getattr(self, attr, None)
+            if timer:
+                timer.cancel()
+                setattr(self, attr, None)
+
     def tune_to(self, channel_number: int, user_initiated: bool = True) -> bool:
         """
         Tune to a specific channel.
@@ -130,19 +140,7 @@ class PlaybackEngine:
         now_playing = None
 
         with self._lock:
-            # Cancel any pending content switch timer
-            if self._timer:
-                self._timer.cancel()
-                self._timer = None
-            if self._music_end_timer:
-                self._music_end_timer.cancel()
-                self._music_end_timer = None
-            if self._next_ep_timer:
-                self._next_ep_timer.cancel()
-                self._next_ep_timer = None
-            if self._mid_ep_timer:
-                self._mid_ep_timer.cancel()
-                self._mid_ep_timer = None
+            self._cancel_all_timers()
 
             # Get what's playing on this channel
             now_playing = self.schedule.what_is_on(channel_number)
@@ -258,18 +256,10 @@ class PlaybackEngine:
                     # seek_position + remaining == duration means content plays to the end
                     at_end = (now_playing.seek_position + now_playing.remaining_seconds
                               >= now_playing.entry.duration_seconds - 2.0)
-                    print(f"  [BUMPER DEBUG] {now_playing.entry.series_name}: "
-                          f"seek={now_playing.seek_position:.1f} + "
-                          f"remaining={now_playing.remaining_seconds:.1f} = "
-                          f"{now_playing.seek_position + now_playing.remaining_seconds:.1f} "
-                          f"vs duration={now_playing.entry.duration_seconds:.1f} "
-                          f"at_end={at_end}")
                     if at_end:
                         # End-of-show bumper: show for last 20s
                         bumper_duration = min(20.0, now_playing.remaining_seconds)
                         delay = now_playing.remaining_seconds - bumper_duration
-                        print(f"  [BUMPER DEBUG] Scheduling end bumper in {delay:.1f}s "
-                              f"(showing for {bumper_duration:.1f}s)")
                         self._next_ep_timer = threading.Timer(
                             delay, self._show_next_episode_bumper,
                             args=[now_playing])
@@ -281,23 +271,16 @@ class PlaybackEngine:
                         seg_start = now_playing.seek_position
                         seg_end = seg_start + now_playing.remaining_seconds
                         if seg_start < ep_midpoint < seg_end:
-                            # Start early enough to get full 20s display
                             ideal_delay = ep_midpoint - seg_start
                             latest_start = now_playing.remaining_seconds - 20.0
                             mid_delay = max(0, min(ideal_delay, latest_start))
                             show_duration = min(20.0, now_playing.remaining_seconds - mid_delay)
                             if show_duration > 10:
-                                print(f"  [BUMPER DEBUG] Scheduling mid bumper in {mid_delay:.1f}s "
-                                      f"(showing for {show_duration:.1f}s)")
                                 self._mid_ep_timer = threading.Timer(
                                     mid_delay, self._show_next_episode_bumper,
                                     args=[now_playing, show_duration])
                                 self._mid_ep_timer.daemon = True
                                 self._mid_ep_timer.start()
-                else:
-                    if now_playing.entry.content_type == "show":
-                        print(f"  [BUMPER DEBUG] Skipped: series_name={now_playing.entry.series_name!r} "
-                              f"remaining={now_playing.remaining_seconds:.1f}")
 
         # Phase 3: Schedule next transition timer (lock held)
         with self._lock:
@@ -452,16 +435,11 @@ class PlaybackEngine:
             duration: If set, auto-remove the overlay after this many seconds.
                       If None, overlay persists until tune_to() clears it.
         """
-        print(f"  [BUMPER DEBUG] Timer fired for {now_playing.entry.series_name}"
-              f" (duration={duration})")
         # Safety check: still on same channel, same content
         with self._lock:
             if (self._current_channel != now_playing.entry.channel_number
                     or self._current_playing is None
                     or self._current_playing.entry.content_id != now_playing.entry.content_id):
-                print(f"  [BUMPER DEBUG] Safety check failed: ch={self._current_channel} "
-                      f"vs {now_playing.entry.channel_number}, "
-                      f"playing={self._current_playing is not None}")
                 return
 
         entry = now_playing.entry
@@ -469,14 +447,11 @@ class PlaybackEngine:
             next_time = self.schedule.find_next_airing(
                 entry.channel_number, entry.series_name,
                 after_time=entry.slot_end_time)
-        except Exception as e:
-            print(f"  [BUMPER DEBUG] Error finding next airing: {e}")
+        except Exception:
             return
 
         if not next_time:
-            print(f"  [BUMPER DEBUG] No next airing found for {entry.series_name}")
             return
-        print(f"  [BUMPER DEBUG] Showing overlay: {entry.series_name} next at {next_time}")
 
         # Format day + time
         today = datetime.now().date()
@@ -526,9 +501,8 @@ class PlaybackEngine:
         )
         bumper_text = box_event + "\n" + text_event
 
-        result = self.mpv.show_osd_overlay(
+        self.mpv.show_osd_overlay(
             self._NEXT_EP_OVERLAY_ID, bumper_text, res_x=640, res_y=480)
-        print(f"  [BUMPER DEBUG] show_osd_overlay returned: {result}")
 
         # Auto-remove after duration (mid-show bumper), or persist until
         # tune_to() clears it (end-of-show bumper)
@@ -575,20 +549,7 @@ class PlaybackEngine:
         Starts a polling timer that checks every 5 seconds for new segments.
         """
         with self._lock:
-            # Cancel any pending timers
-            if self._timer:
-                self._timer.cancel()
-                self._timer = None
-            if self._music_end_timer:
-                self._music_end_timer.cancel()
-                self._music_end_timer = None
-            if self._next_ep_timer:
-                self._next_ep_timer.cancel()
-                self._next_ep_timer = None
-            if self._mid_ep_timer:
-                self._mid_ep_timer.cancel()
-                self._mid_ep_timer = None
-
+            self._cancel_all_timers()
             self._current_channel = channel_number
             self._current_playing = None
 
@@ -716,6 +677,11 @@ class PlaybackEngine:
         Accounts for overscan: video-margin-ratio shifts the video inward,
         so the overlay coordinates must shift by the same amount.
         """
+        # Guard: only show clock if still on the weather channel
+        with self._lock:
+            if self._current_channel != self.config.weather.channel_number:
+                return
+
         now = datetime.now()
         time_str = now.strftime("%I:%M %p").lstrip("0").upper()
 
@@ -748,19 +714,7 @@ class PlaybackEngine:
         segments every 5 seconds (identical pattern to guide channel).
         """
         with self._lock:
-            if self._timer:
-                self._timer.cancel()
-                self._timer = None
-            if self._music_end_timer:
-                self._music_end_timer.cancel()
-                self._music_end_timer = None
-            if self._next_ep_timer:
-                self._next_ep_timer.cancel()
-                self._next_ep_timer = None
-            if self._mid_ep_timer:
-                self._mid_ep_timer.cancel()
-                self._mid_ep_timer = None
-
+            self._cancel_all_timers()
             self._current_channel = channel_number
             self._current_playing = None
 
@@ -802,10 +756,10 @@ class PlaybackEngine:
 
         self._show_channel_osd(channel_number)
         # Start showing the live clock (delayed so channel OSD shows first)
-        clock_timer = threading.Timer(
+        self._weather_clock_timer = threading.Timer(
             self.config.playback.osd_duration + 0.5, self._show_weather_clock)
-        clock_timer.daemon = True
-        clock_timer.start()
+        self._weather_clock_timer.daemon = True
+        self._weather_clock_timer.start()
 
         self._weather_current_file = file_path
 
@@ -908,12 +862,21 @@ class PlaybackEngine:
                 channel = self._current_channel
                 self._timer = None
 
-        # Tune outside the lock to avoid deadlock (not user-initiated)
-        if channel:
-            try:
-                self.tune_to(channel, user_initiated=False)
-            except Exception as e:
-                print(f"Error during content transition: {e}")
+        if not channel:
+            return
+
+        # Re-check under lock that the channel hasn't been changed by a
+        # user-initiated tune_to() between the snapshot above and now.
+        # Without this, a user channel change racing with this timer
+        # would be overwritten.
+        with self._lock:
+            if self._current_channel != channel:
+                return
+
+        try:
+            self.tune_to(channel, user_initiated=False)
+        except Exception as e:
+            print(f"Error during content transition: {e}")
 
     def channel_up(self) -> bool:
         """Switch to next channel."""
@@ -1014,18 +977,7 @@ class PlaybackEngine:
     def stop(self) -> None:
         """Stop playback."""
         with self._lock:
-            if self._timer:
-                self._timer.cancel()
-                self._timer = None
-            if self._music_end_timer:
-                self._music_end_timer.cancel()
-                self._music_end_timer = None
-            if self._next_ep_timer:
-                self._next_ep_timer.cancel()
-                self._next_ep_timer = None
-            if self._mid_ep_timer:
-                self._mid_ep_timer.cancel()
-                self._mid_ep_timer = None
+            self._cancel_all_timers()
 
         self.mpv.stop()
         self._current_playing = None

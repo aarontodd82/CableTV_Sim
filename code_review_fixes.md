@@ -3,55 +3,49 @@
 ## Bugs
 
 ### 1. Weather clock shows on wrong channel
-**File:** `app/cabletv/playback/engine.py:805-808`
+**File:** `app/cabletv/playback/engine.py`
 **Severity:** Bug - visible
-**Status:** [ ] Not started
+**Status:** [x] Fixed
 
-The initial weather clock timer is fire-and-forget (not stored in an instance variable, no channel guard check). If you tune to the weather channel and switch away within ~2.5s, the timer fires `_show_weather_clock()` which adds an overlay to whatever channel is now playing.
-
-**Fix:** Store the timer and cancel it with the others, or add a channel guard inside `_show_weather_clock()`.
+Added channel guard check inside `_show_weather_clock()` that returns early if no longer on weather channel. Stored the initial clock timer as `_weather_clock_timer` so it can be cancelled by `_cancel_all_timers()`.
 
 ---
 
 ### 2. Timer race can override user channel change
-**File:** `app/cabletv/playback/engine.py:903-916`
+**File:** `app/cabletv/playback/engine.py`
 **Severity:** Bug - intermittent
+**Status:** [x] Fixed
 
-`_on_content_end()` reads `_current_channel` under lock, releases the lock, then calls `tune_to()`. A user channel change in the gap overwrites the user's choice.
-
-**Fix:** Check that `_current_channel` hasn't changed before calling `tune_to()`, or re-check inside `tune_to` early.
+Added a second lock check in `_on_content_end()` that verifies `_current_channel` hasn't changed between the initial snapshot and the `tune_to()` call. If it changed (user switched), the timer silently returns.
 
 ---
 
 ### 3. Block cache invalidation contradicts base engine in remote/server mode
-**Files:** `app/cabletv/schedule/remote_provider.py:73-77`, `app/cabletv/main.py:80-85`
+**Files:** `app/cabletv/schedule/remote_provider.py`, `app/cabletv/main.py`
 **Severity:** Bug - server/remote mode
+**Status:** [x] Fixed
 
-The base `advance_position()` explicitly does NOT clear the block cache (with a detailed comment explaining cascade instability). But `RemoteScheduleProvider.advance_position` and `_server_advance` in main.py both clear it — causing the exact instability the base engine avoids.
-
-**Fix:** Remove block cache invalidation from remote_provider and _server_advance to match base engine behavior.
+Removed block cache invalidation from `RemoteScheduleProvider.advance_position` and simplified `_server_advance` in main.py to match the base engine's intentional "don't clear cache" behavior.
 
 ---
 
 ### 4. `slot_remaining_seconds` wrong during commercials and mid-content
-**File:** `app/cabletv/schedule/engine.py:383-388`
+**File:** `app/cabletv/schedule/engine.py`
 **Severity:** Bug - API correctness
+**Status:** [x] Fixed
 
-During a commercial, returns remaining time in the current commercial segment only (not the whole slot). During content, returns remaining time in the current content segment + commercial padding (omitting remaining content after future break points).
-
-**Fix:** Calculate true slot remaining from `slot_end_time - now` instead of summing partial values.
+Changed to compute from `(slot_end_time - start_time) - elapsed_seconds` which gives the true remaining time in the entire slot block regardless of current segment type.
 
 ---
 
 ## Performance
 
 ### 5. Break points queried from DB on every `what_is_on()` call
-**File:** `app/cabletv/schedule/engine.py:763-767`
+**File:** `app/cabletv/schedule/engine.py`
 **Severity:** Performance
+**Status:** [x] Fixed
 
-Opens a DB connection and queries break_points every call. Break points never change at runtime. Fires on every channel change, timer transition, guide generation, API poll.
-
-**Fix:** Add a break point cache dict keyed by content_id.
+Added `_break_point_cache` dict keyed by content_id. First lookup hits DB, subsequent lookups are instant. Cache cleared with `clear_cache()`.
 
 ---
 
@@ -60,47 +54,38 @@ Opens a DB connection and queries break_points every call. Break points never ch
 ### 6. Timer cancellation copy-pasted in 4+ places
 **File:** `app/cabletv/playback/engine.py`
 **Severity:** Maintenance hazard
+**Status:** [x] Fixed
 
-4 timer fields cancelled identically in `tune_to()`, `_tune_to_guide()`, `_tune_to_weather()`, `stop()`. Adding a 5th timer requires updating 4+ locations.
-
-**Fix:** Extract `_cancel_all_timers()` helper.
+Extracted `_cancel_all_timers()` helper that iterates all 5 timer fields. Used in `tune_to()`, `_tune_to_guide()`, `_tune_to_weather()`, and `stop()`.
 
 ---
 
 ### 7. Dead `preserve_block_start` parameter documented as "Unused" but actually used
-**File:** `app/cabletv/schedule/engine.py:526-528`
+**File:** `app/cabletv/schedule/engine.py`
 **Severity:** Confusing
-
-Docstring says "Unused (kept for API compat)" but server_advance and RemoteScheduleProvider both use it.
-
-**Fix:** Remove the parameter entirely (will be resolved as part of fix #3).
+**Status:** [ ] Deferred — kept for now since remote/server still pass it to the server API
 
 ---
 
 ### 8. `_type_avg_durations` only samples first episode per group
-**File:** `app/cabletv/schedule/engine.py:569-573`
+**File:** `app/cabletv/schedule/engine.py`
 **Severity:** Minor inaccuracy
+**Status:** [x] Fixed
 
-Averages only the first item's duration from each group, not the true group average.
-
-**Fix:** Average all items, or at minimum document the sampling strategy.
+Changed to average all items across all groups per type, not just the first item.
 
 ---
 
 ### 9. `check_collisions` can never find collisions
-**File:** `app/cabletv/schedule/engine.py:1340-1367`
+**File:** `app/cabletv/schedule/engine.py`
 **Severity:** Dead code
-
-`what_is_on()` already enforces collision avoidance via `_get_exclusions()`, so `check_collisions` always returns empty.
-
-**Fix:** Remove or repurpose (e.g., check across a time range, or test with exclusions disabled).
+**Status:** [ ] Deferred — harmless, used as a CLI diagnostic tool
 
 ---
 
 ### 10. Debug print statements left in production
-**File:** `app/cabletv/playback/engine.py:261-300`
+**File:** `app/cabletv/playback/engine.py`
 **Severity:** Noise
+**Status:** [x] Fixed
 
-Extensive `[BUMPER DEBUG]` prints fire on every `tune_to()` call for shows.
-
-**Fix:** Remove or gate behind a debug/verbose flag.
+Removed all `[BUMPER DEBUG]` print statements from `tune_to()` and `_show_next_episode_bumper()`.
