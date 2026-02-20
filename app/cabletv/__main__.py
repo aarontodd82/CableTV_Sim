@@ -19,7 +19,9 @@ def cmd_start(args):
     elif args.remote:
         config.network.mode = "remote"
 
-    start_system(fullscreen=not args.windowed, no_web=args.no_web, config=config)
+    headless = getattr(args, 'headless', False)
+    start_system(fullscreen=not args.windowed, no_web=args.no_web,
+                 headless=headless, config=config)
 
 
 def cmd_ingest_scan(args):
@@ -533,7 +535,9 @@ def main():
     start_parser.add_argument("--no-web", action="store_true",
                               help="Don't start web interface")
     start_parser.add_argument("--server", action="store_true",
-                              help="Run as server (advertise via mDNS, serve API for remotes)")
+                              help="Run as server (fullscreen + API + generators)")
+    start_parser.add_argument("--headless", action="store_true",
+                              help="No video window (server only — just API + generators)")
     start_parser.add_argument("--remote", action="store_true",
                               help="Run as remote client (discover server, use shared content)")
     start_parser.set_defaults(func=cmd_start)

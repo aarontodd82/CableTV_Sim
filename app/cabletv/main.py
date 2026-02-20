@@ -329,14 +329,15 @@ class CableTVSystem:
 
         print("Shutdown complete")
 
-    def run(self, fullscreen: bool = True, no_web: bool = False) -> int:
+    def run(self, fullscreen: bool = True, no_web: bool = False,
+            headless: bool = False) -> int:
         """
         Run the complete CableTV system.
 
         Args:
-            fullscreen: Start in fullscreen mode.
-                For server mode: False = headless (no mpv), True = server + TV.
+            fullscreen: Start in fullscreen mode
             no_web: Don't start web interface
+            headless: No video window (server only — just API + generators)
 
         Returns:
             Exit code (0 for success)
@@ -348,19 +349,14 @@ class CableTVSystem:
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
 
-        is_server = self.config.network.mode == "server"
-        # Server mode is headless by default — only start playback
-        # if --windowed was passed (fullscreen=True means --windowed was NOT set)
-        headless = is_server and fullscreen
-
         try:
             # Initialize
             if not self.initialize():
                 return 1
 
-            # Start playback (skip in headless server mode)
+            # Start playback (skip in headless mode)
             if headless:
-                print("Server running headless (no video). Use --windowed for a window.")
+                print("Running headless (no video). Use without --headless for a window.")
             else:
                 if not self.start_playback(fullscreen=fullscreen):
                     return 1
@@ -402,20 +398,21 @@ class CableTVSystem:
 
 
 def start_system(fullscreen: bool = True, no_web: bool = False,
-                  config: Optional[Config] = None) -> int:
+                  headless: bool = False, config: Optional[Config] = None) -> int:
     """
     Convenience function to start the CableTV system.
 
     Args:
         fullscreen: Start in fullscreen mode
         no_web: Don't start web interface
+        headless: No video window (server only)
         config: Pre-loaded config (optional, loads from file if not provided)
 
     Returns:
         Exit code
     """
     system = CableTVSystem(config=config)
-    return system.run(fullscreen=fullscreen, no_web=no_web)
+    return system.run(fullscreen=fullscreen, no_web=no_web, headless=headless)
 
 
 def quick_test() -> None:
