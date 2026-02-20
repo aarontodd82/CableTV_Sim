@@ -27,11 +27,13 @@ class PlaybackEngine:
 
     def __init__(self, config: Config, schedule_engine: ScheduleEngine,
                  content_root: Optional[Path] = None,
-                 media_base_url: Optional[str] = None):
+                 media_base_url: Optional[str] = None,
+                 clock_offset: float = 0.0):
         self.config = config
         self.schedule = schedule_engine
         self._content_root = content_root or get_drive_root()
         self._media_base_url = media_base_url  # HTTP URL for streaming (remote mode)
+        self._clock_offset = timedelta(seconds=clock_offset)
         self.mpv = MpvController(config)
         self._current_channel: Optional[int] = None
         self._current_playing: Optional[NowPlaying] = None
@@ -50,6 +52,10 @@ class PlaybackEngine:
         # Track which content has been "seen" per channel (content_id already advanced)
         self._seen_content: dict[int, int] = {}  # channel -> content_id
         self._bumper_bg_path: Optional[Path] = None
+
+    def _now(self) -> datetime:
+        """Get current time adjusted for clock offset (remote sync)."""
+        return datetime.now() + self._clock_offset
 
     def _resolve_media_path(self, rel_path: str) -> str:
         """Resolve a relative media path to a playable URL or local path.
@@ -468,7 +474,7 @@ class PlaybackEngine:
             return
 
         # Format day + time
-        today = datetime.now().date()
+        today = self._now().date()
         next_date = next_time.date()
         delta_days = (next_date - today).days
 
@@ -594,8 +600,7 @@ class PlaybackEngine:
         file_path, generation_time, segment_duration = segment_info
 
         # Calculate seek position: where we should be in the segment right now
-        now = datetime.now()
-        elapsed = (now - generation_time).total_seconds()
+        elapsed = (self._now() - generation_time).total_seconds()
         seek = elapsed % segment_duration if segment_duration > 0 else 0
 
         # Play the segment file, looping so it never stops between polls
@@ -657,8 +662,7 @@ class PlaybackEngine:
             if old_file is None or file_path != old_file:
                 # Segment changed — switch to the new one
                 print(f"  Guide: switching to new segment")
-                now = datetime.now()
-                elapsed = (now - generation_time).total_seconds()
+                elapsed = (self._now() - generation_time).total_seconds()
                 seek = elapsed % segment_duration if segment_duration > 0 else 0
 
                 self.mpv._set_property("loop-file", "inf")
@@ -696,7 +700,7 @@ class PlaybackEngine:
             if self._current_channel != self.config.weather.channel_number:
                 return
 
-        now = datetime.now()
+        now = self._now()
         time_str = now.strftime("%I:%M %p").lstrip("0").upper()
 
         # Base position in 640x480 space (center of clock gap)
@@ -756,8 +760,7 @@ class PlaybackEngine:
 
         file_path, generation_time, segment_duration = segment_info
 
-        now = datetime.now()
-        elapsed = (now - generation_time).total_seconds()
+        elapsed = (self._now() - generation_time).total_seconds()
         seek = elapsed % segment_duration if segment_duration > 0 else 0
 
         self.mpv.set_volume(100)
@@ -825,8 +828,7 @@ class PlaybackEngine:
 
             if old_file is None or file_path != old_file:
                 print(f"  Weather: switching to new segment")
-                now = datetime.now()
-                elapsed = (now - generation_time).total_seconds()
+                elapsed = (self._now() - generation_time).total_seconds()
                 seek = elapsed % segment_duration if segment_duration > 0 else 0
 
                 self.mpv._set_property("loop-file", "inf")

@@ -200,7 +200,7 @@ class CableTVSystem:
         media_url = f"{self._server_connection.server_url}/media"
         self.playback = PlaybackEngine(
             self.config, self.schedule, content_root=content_root,
-            media_base_url=media_url,
+            media_base_url=media_url, clock_offset=clock_offset,
         )
         print(f"  Playback engine ready (streaming via {media_url})")
 
