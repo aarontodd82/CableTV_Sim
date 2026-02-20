@@ -366,7 +366,7 @@ class CableTVSystem:
                 self.start_web_server()
 
             # Start mDNS advertiser (server mode)
-            if is_server:
+            if self.config.network.mode == "server":
                 try:
                     from .network.discovery import ServerAdvertiser
                     self._advertiser = ServerAdvertiser(
