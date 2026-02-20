@@ -163,7 +163,7 @@ def configure_display() -> dict:
     elif sys.platform == "win32":
         config.update({
             "video_output": "gpu",
-            "hwdec": "auto-safe",
+            "hwdec": "auto-copy",
         })
 
     return config

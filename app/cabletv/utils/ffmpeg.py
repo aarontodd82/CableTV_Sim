@@ -202,3 +202,5 @@ def check_ffprobe_available() -> bool:
         return True
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return False
+
+
