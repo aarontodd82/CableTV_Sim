@@ -35,6 +35,7 @@ def get_db_path(root: Optional[Path] = None) -> Path:
 def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     """
     Get a database connection with WAL mode enabled.
+    Remote mode skips WAL (local temp copy, read-only use).
 
     Args:
         db_path: Path to database file, or None for default
@@ -47,7 +48,8 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
 
     conn = sqlite3.connect(str(db_path), timeout=30.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    if _remote_db_path is None or db_path != _remote_db_path:
+        conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 

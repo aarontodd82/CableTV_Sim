@@ -398,8 +398,8 @@ class ScheduleEngine:
         self.config = config
         self.epoch = parse_epoch(config.schedule.epoch)
         self.slot_duration = config.schedule.slot_duration
-        # Generate a fresh random seed each launch so the schedule varies
-        self.seed = random.randint(0, 2**31 - 1)
+        # Use config seed for deterministic, reproducible scheduling
+        self.seed = config.schedule.seed
         self._channel_pools: dict[int, list[dict]] = {}
         self._channel_groups: dict[int, list[ContentGroup]] = {}
         self._positions: dict[tuple[int, str], int] = {}  # (channel, group_key) -> position

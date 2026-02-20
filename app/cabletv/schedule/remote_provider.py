@@ -6,10 +6,11 @@ runs locally for zero-latency channel switching.
 """
 
 import requests
+from datetime import datetime, timedelta
 from typing import Optional
 
 from ..config import Config
-from .engine import ScheduleEngine
+from .engine import ScheduleEngine, NowPlaying
 
 
 class RemoteScheduleProvider(ScheduleEngine):
@@ -20,13 +21,36 @@ class RemoteScheduleProvider(ScheduleEngine):
     are sent back to the server (with local fallback).
     """
 
-    def __init__(self, config: Config, server_url: str, seed: int):
+    def __init__(self, config: Config, server_url: str, seed: int,
+                 clock_offset: float = 0.0):
         super().__init__(config)
         # Override the random seed with the server's seed
         self.seed = seed
         self._server_url = server_url
+        self._clock_offset = timedelta(seconds=clock_offset)
         self._session = requests.Session()
         self._session.timeout = 5
+
+    def what_is_on(self, channel_number: int,
+                   when: Optional[datetime] = None) -> Optional[NowPlaying]:
+        """Get what's on, adjusted to server's clock."""
+        if when is None:
+            when = datetime.now() + self._clock_offset
+        return super().what_is_on(channel_number, when)
+
+    def get_upcoming(self, channel_number: int, count: int = 3,
+                     after_time=None):
+        """Get upcoming programs, adjusted to server's clock."""
+        if after_time is None:
+            after_time = datetime.now() + self._clock_offset
+        return super().get_upcoming(channel_number, count, after_time)
+
+    def get_guide_data(self, start_time=None, hours: int = 3,
+                       channels=None):
+        """Get guide data, adjusted to server's clock."""
+        if start_time is None:
+            start_time = datetime.now() + self._clock_offset
+        return super().get_guide_data(start_time, hours, channels)
 
     def _load_positions(self) -> None:
         """Load positions from server API instead of local DB."""

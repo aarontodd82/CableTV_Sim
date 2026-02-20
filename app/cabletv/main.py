@@ -106,6 +106,8 @@ class CableTVSystem:
 
     def _initialize_remote(self) -> bool:
         """Initialize in remote mode — connect to server, use shared content."""
+        import shutil
+        import tempfile
         from pathlib import Path
         from .network.client import ServerConnection
         from .network.segment_provider import RemoteSegmentProvider
@@ -164,31 +166,43 @@ class CableTVSystem:
             return False
         print(f"  Content root: {content_root}")
 
-        # Step 5: Point DB at network share (read-only)
+        # Step 5: Copy DB locally (SQLite doesn't work over network shares)
         remote_db = content_root / "cabletv.db"
         if not remote_db.exists():
             print(f"Error: Database not found on share: {remote_db}")
             return False
-        db.set_remote_db_path(remote_db)
-        print("  Database: using server's DB (read-only)")
+        local_db = Path(tempfile.gettempdir()) / "cabletv_remote.db"
+        shutil.copy2(str(remote_db), str(local_db))
+        db.set_remote_db_path(local_db)
+        print(f"  Database: copied from server ({local_db})")
 
         # Do NOT call init_database() — no migrations on server's DB
         # Ensure local directories exist for bumper background etc.
         ensure_directories()
 
-        # Step 6: Create remote schedule provider (local engine with server's seed)
+        # Step 6: Measure clock offset for sync
+        clock_offset = self._server_connection.measure_clock_offset()
+        if abs(clock_offset) > 0.1:
+            print(f"  Clock offset: {clock_offset:+.3f}s (adjusting)")
+        else:
+            print(f"  Clock offset: {clock_offset:+.3f}s (in sync)")
+
+        # Step 7: Create remote schedule provider (local engine with server's seed)
         self.schedule = RemoteScheduleProvider(
             self.config,
             self._server_connection.server_url,
             seed,
+            clock_offset=clock_offset,
         )
         print("  Schedule engine ready (remote, local computation)")
 
-        # Step 7: Create playback engine with content_root
+        # Step 8: Create playback engine with HTTP streaming
+        media_url = f"{self._server_connection.server_url}/media"
         self.playback = PlaybackEngine(
             self.config, self.schedule, content_root=content_root,
+            media_base_url=media_url,
         )
-        print("  Playback engine ready")
+        print(f"  Playback engine ready (streaming via {media_url})")
 
         # Step 8: Set up guide/weather segment providers from network share
         if self.config.guide.enabled:

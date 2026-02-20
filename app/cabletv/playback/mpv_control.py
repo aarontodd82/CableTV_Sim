@@ -60,6 +60,9 @@ class MpvController:
         mpv_path = get_mpv_path()
         display_config = configure_display()
 
+        # Autocrop Lua script (detects and removes baked-in black bars)
+        autocrop_script = Path(__file__).resolve().parent / "autocrop.lua"
+
         cmd = [
             mpv_path,
             f"--input-ipc-server={self._ipc_address}",
@@ -70,6 +73,11 @@ class MpvController:
             "--osd-duration=2000",
             "--osd-font=VCR OSD Mono",
             "--af=loudnorm=I=-24:TP=-2:LRA=11",
+            f"--script={autocrop_script}",
+            # Cache settings for network share playback
+            "--cache=yes",
+            "--cache-secs=10",
+            "--demuxer-readahead-secs=3",
         ]
 
         # Add fullscreen or fixed window size
@@ -284,24 +292,28 @@ class MpvController:
         Returns:
             True if successful
         """
-        # Load the file, with optional audio attachment
+        # Build options — use start= to seek during load (no flash of position 0)
+        options_parts = []
+        if seek_seconds > 0:
+            options_parts.append(f"start={seek_seconds}")
         if audio_file:
-            options = f"audio-file={audio_file},image-display-duration=inf"
+            options_parts.append(f"audio-file={audio_file}")
+            options_parts.append("image-display-duration=inf")
+        options = ",".join(options_parts) if options_parts else ""
+
+        if options:
             response = self._send_command(["loadfile", path, "replace", -1, options])
         else:
             response = self._send_command(["loadfile", path, "replace"])
         if response is None:
             return False
 
-        # Poll until mpv reports a playback position (file is loaded)
-        for _ in range(30):  # Up to 3 seconds
-            time.sleep(0.1)
+        # Wait for file to load (poll at 50ms intervals)
+        for _ in range(40):  # Up to 2 seconds
+            time.sleep(0.05)
             pos = self._get_property("time-pos")
             if pos is not None:
                 break
-
-        if seek_seconds > 0:
-            self.seek(seek_seconds)
 
         # Ensure playback is not paused — keep-open=yes leaves mpv paused
         # when a file ends, and loadfile may inherit that paused state

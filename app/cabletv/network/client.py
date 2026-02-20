@@ -1,5 +1,6 @@
 """Client for connecting to a CableTV server."""
 
+import time
 import requests
 from typing import Optional
 
@@ -76,6 +77,42 @@ class ServerConnection:
         except (requests.RequestException, ValueError) as e:
             print(f"  Error fetching server info: {e}")
             return None
+
+    def measure_clock_offset(self, samples: int = 5) -> float:
+        """Measure the clock offset between this machine and the server.
+
+        Uses multiple samples and takes the median to reduce noise.
+        Positive offset means server clock is ahead of local clock.
+
+        Returns:
+            Offset in seconds (add to local time to match server)
+        """
+        if not self._server_url:
+            return 0.0
+
+        offsets = []
+        for _ in range(samples):
+            try:
+                t1 = time.time()
+                resp = self._session.get(
+                    f"{self._server_url}/api/server/time", timeout=5)
+                t2 = time.time()
+                if resp.status_code == 200:
+                    server_time = resp.json()["time"]
+                    rtt = t2 - t1
+                    # Server timestamp was captured mid-round-trip
+                    estimated_server_now = server_time + rtt / 2
+                    offset = estimated_server_now - t2
+                    offsets.append(offset)
+            except (requests.RequestException, ValueError, KeyError):
+                pass
+
+        if not offsets:
+            return 0.0
+
+        # Median is more robust than mean against outliers
+        offsets.sort()
+        return offsets[len(offsets) // 2]
 
     def get_positions(self) -> dict[str, int]:
         """Fetch all series positions from server.

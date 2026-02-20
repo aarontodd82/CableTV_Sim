@@ -1,9 +1,12 @@
 """Server API endpoints for remote clients."""
 
-from flask import Blueprint, jsonify, request
+from datetime import datetime
+from flask import Blueprint, jsonify, request, send_from_directory
+from pathlib import Path
 from typing import Optional
 
 from ..config import Config
+from ..platform import get_drive_root
 from ..schedule.server_manager import ServerScheduleManager
 
 server_bp = Blueprint("server", __name__)
@@ -11,13 +14,15 @@ server_bp = Blueprint("server", __name__)
 # Set by register_server_api()
 _server_manager: Optional[ServerScheduleManager] = None
 _config: Optional[Config] = None
+_drive_root: Optional[Path] = None
 
 
 def register_server_api(app, config: Config, server_manager: ServerScheduleManager):
     """Register server API blueprint with the Flask app."""
-    global _server_manager, _config
+    global _server_manager, _config, _drive_root
     _server_manager = server_manager
     _config = config
+    _drive_root = get_drive_root()
     app.register_blueprint(server_bp)
 
 
@@ -90,3 +95,31 @@ def server_positions():
 
     positions = _server_manager.get_all_positions()
     return jsonify({"positions": positions})
+
+
+@server_bp.route("/api/server/time")
+def server_time():
+    """Return server's current time for clock offset calculation."""
+    return jsonify({"time": datetime.now().timestamp()})
+
+
+@server_bp.route("/media/<path:filepath>")
+def serve_media(filepath):
+    """Serve content files over HTTP for remote playback.
+
+    mpv streams these with range requests for fast seeking —
+    much faster than SMB for channel switching.
+    """
+    if not _drive_root:
+        return jsonify({"error": "Server not initialized"}), 500
+
+    # Security: prevent path traversal
+    requested = (_drive_root / filepath).resolve()
+    if not str(requested).startswith(str(_drive_root.resolve())):
+        return jsonify({"error": "Forbidden"}), 403
+
+    return send_from_directory(
+        str(_drive_root),
+        filepath,
+        conditional=True,  # Enables range requests (206 Partial Content)
+    )

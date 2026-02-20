@@ -26,10 +26,12 @@ class PlaybackEngine:
     """
 
     def __init__(self, config: Config, schedule_engine: ScheduleEngine,
-                 content_root: Optional[Path] = None):
+                 content_root: Optional[Path] = None,
+                 media_base_url: Optional[str] = None):
         self.config = config
         self.schedule = schedule_engine
         self._content_root = content_root or get_drive_root()
+        self._media_base_url = media_base_url  # HTTP URL for streaming (remote mode)
         self.mpv = MpvController(config)
         self._current_channel: Optional[int] = None
         self._current_playing: Optional[NowPlaying] = None
@@ -48,6 +50,18 @@ class PlaybackEngine:
         # Track which content has been "seen" per channel (content_id already advanced)
         self._seen_content: dict[int, int] = {}  # channel -> content_id
         self._bumper_bg_path: Optional[Path] = None
+
+    def _resolve_media_path(self, rel_path: str) -> str:
+        """Resolve a relative media path to a playable URL or local path.
+
+        In remote mode with HTTP streaming, returns an HTTP URL.
+        Otherwise returns a local filesystem path.
+        """
+        if self._media_base_url:
+            # Convert backslashes to forward slashes for URL
+            url_path = rel_path.replace("\\", "/")
+            return f"{self._media_base_url}/{url_path}"
+        return str(self._content_root / rel_path)
 
     def set_guide_generator(self, generator: "GuideGenerator") -> None:
         """Set the guide generator for TV Guide channel playback."""
@@ -179,23 +193,23 @@ class PlaybackEngine:
                 self._current_playing = None
                 play_action = "no_content"
             else:
-                root = self._content_root
-
                 if now_playing.is_commercial and now_playing.commercial:
-                    file_path = root / now_playing.commercial.file_path
+                    rel_path = now_playing.commercial.file_path
                     seek_position = now_playing.commercial.seek_position
                     play_action = "play_file"
                 elif now_playing.is_commercial and not now_playing.commercial:
                     play_action = "info_bumper"
                 else:
-                    file_path = root / now_playing.entry.file_path
+                    rel_path = now_playing.entry.file_path
                     seek_position = now_playing.seek_position
                     play_action = "play_file"
 
-                # Check file exists
-                if play_action == "play_file" and not file_path.exists():
-                    print(f"Content file not found: {file_path}")
-                    play_action = "no_content"
+                if play_action == "play_file":
+                    file_path = self._resolve_media_path(rel_path)
+                    # Only check existence for local files (not HTTP URLs)
+                    if not self._media_base_url and not Path(file_path).exists():
+                        print(f"Content file not found: {file_path}")
+                        play_action = "no_content"
 
                 # Update state
                 self._current_channel = channel_number
