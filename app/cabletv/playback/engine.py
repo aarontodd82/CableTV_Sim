@@ -242,16 +242,19 @@ class PlaybackEngine:
 
         elif play_action == "play_file":
             self.mpv.set_volume(100)
-            t_before = time.time()
             success = self.mpv.play_file(str(file_path), seek_seconds=seek_position)
             if not success:
                 print(f"Failed to play {file_path}")
             else:
-                # Compensate for file load time — the seek position was calculated
-                # before loading, so playback is behind by however long loading took
-                load_time = time.time() - t_before
-                if load_time > 0.3:
-                    self.mpv.seek(load_time, absolute=False)
+                # Recalculate seek position now that playback has started —
+                # the original was computed before loading, which can take
+                # time on HTTP streams, putting us behind
+                fresh = self.schedule.what_is_on(channel_number)
+                if fresh:
+                    if fresh.is_commercial and fresh.commercial:
+                        self.mpv.seek(fresh.commercial.seek_position)
+                    elif not fresh.is_commercial:
+                        self.mpv.seek(fresh.seek_position)
                 return False
 
             if now_playing and now_playing.is_commercial:
