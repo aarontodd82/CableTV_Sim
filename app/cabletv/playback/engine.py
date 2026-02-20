@@ -255,7 +255,11 @@ class PlaybackEngine:
                         self.mpv.seek(fresh.commercial.seek_position)
                     elif not fresh.is_commercial:
                         self.mpv.seek(fresh.seek_position)
-                return False
+                    # Update state with fresh timing so transition timer
+                    # and OSD use accurate remaining-time values
+                    now_playing = fresh
+                    with self._lock:
+                        self._current_playing = fresh
 
             if now_playing and now_playing.is_commercial:
                 # Commercials: only show OSD on user-initiated channel changes
