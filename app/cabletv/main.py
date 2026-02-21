@@ -89,9 +89,21 @@ class CableTVSystem:
         print("  Playback engine ready")
 
         # Create guide generator if enabled
+        # IMPORTANT: The guide gets its own ScheduleEngine instance so its
+        # block cache doesn't contaminate the playback engine's cache.
+        # The guide queries 2+ hours of future slots across all channels,
+        # populating the block cache with entries computed under different
+        # exclusion contexts (exclusion sets are slot-dependent).  If the
+        # guide shares the playback engine's cache, subsequent playback
+        # queries reuse these stale cached intermediates (which don't
+        # re-check exclusions), producing wrong content selections.
+        # This caused ~25% of channels to diverge between server and
+        # remote, since the remote has no guide generator and computes
+        # everything fresh.
         if self.config.guide.enabled:
             from .guide.generator import GuideGenerator
-            self.guide_generator = GuideGenerator(self.config, self.schedule)
+            guide_schedule = ScheduleEngine(self.config)
+            self.guide_generator = GuideGenerator(self.config, guide_schedule)
             self.playback.set_guide_generator(self.guide_generator)
             print("  Guide generator ready")
 
