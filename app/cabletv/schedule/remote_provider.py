@@ -55,10 +55,14 @@ class RemoteScheduleProvider(ScheduleEngine):
             print(f"  Error: Could not load schedule data from server: {e}")
             return False
 
-        # Pre-populate channel pools (content per channel)
-        channel_pools = data.get("channel_pools", {})
-        for ch_str, pool in channel_pools.items():
-            self._channel_pools[int(ch_str)] = pool
+        # Reassemble channel pools from deduplicated format:
+        # content_items = {id: {fields...}}, channel_pool_ids = {ch: [id, ...]}
+        content_items = data.get("content_items", {})
+        channel_pool_ids = data.get("channel_pool_ids", {})
+        for ch_str, ids in channel_pool_ids.items():
+            self._channel_pools[int(ch_str)] = [
+                content_items[str(cid)] for cid in ids if str(cid) in content_items
+            ]
 
         # Pre-populate break points
         break_points = data.get("break_points", {})
@@ -83,9 +87,10 @@ class RemoteScheduleProvider(ScheduleEngine):
         from .commercials import set_commercial_pool
         set_commercial_pool(commercials)
 
-        pool_count = sum(len(p) for p in channel_pools.values())
+        pool_count = sum(len(ids) for ids in channel_pool_ids.values())
         bp_count = sum(len(b) for b in break_points.values())
-        print(f"  Schedule data: {pool_count} content items, "
+        print(f"  Schedule data: {len(content_items)} unique items "
+              f"({pool_count} across channels), "
               f"{bp_count} break points, {len(commercials)} commercials, "
               f"{len(positions)} positions")
         return True

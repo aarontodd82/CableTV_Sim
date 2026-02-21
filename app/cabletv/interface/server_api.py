@@ -119,17 +119,25 @@ def schedule_data():
         "original_path", "artist",
     )
 
-    # Channel pools (content per channel, already filtered by tags/types)
-    channel_pools = {}
+    # Deduplicated approach: send each content item ONCE in a flat dict,
+    # then just list IDs per channel. Cuts payload ~4x since the same
+    # movie/show appears on multiple channels.
+    content_items = {}  # id -> stripped dict
+    channel_pool_ids = {}  # channel_number -> [id, id, ...]
     all_content_ids = set()
+
     for ch in _config.channels:
         pool = engine.get_channel_pool(ch)
-        channel_pools[str(ch.number)] = [
-            {k: item[k] for k in _POOL_FIELDS if k in item}
-            for item in pool
-        ]
+        ids = []
         for item in pool:
-            all_content_ids.add(item["id"])
+            cid = item["id"]
+            ids.append(cid)
+            if cid not in content_items:
+                content_items[cid] = {
+                    k: item[k] for k in _POOL_FIELDS if k in item
+                }
+                all_content_ids.add(cid)
+        channel_pool_ids[str(ch.number)] = ids
 
     # Break points — single bulk query instead of one per content item
     break_points = {}
@@ -159,9 +167,9 @@ def schedule_data():
     # Positions
     positions = _server_manager.get_all_positions()
 
-    # Gzip the response — 30+ MB uncompressed, ~2 MB compressed
     payload = json.dumps({
-        "channel_pools": channel_pools,
+        "content_items": {str(k): v for k, v in content_items.items()},
+        "channel_pool_ids": channel_pool_ids,
         "break_points": break_points,
         "commercials": commercials,
         "positions": positions,
