@@ -62,6 +62,8 @@ class MpvController:
 
         # Autocrop Lua script (detects and removes baked-in black bars)
         autocrop_script = Path(__file__).resolve().parent / "autocrop.lua"
+        # Keyboard bindings Lua script (channel up/down, digits, info, quit)
+        keybinds_script = Path(__file__).resolve().parent / "keybinds.lua"
 
         cmd = [
             mpv_path,
@@ -74,6 +76,8 @@ class MpvController:
             "--osd-font=VCR OSD Mono",
             "--af=loudnorm=I=-24:TP=-2:LRA=11",
             f"--script={autocrop_script}",
+            f"--script={keybinds_script}",
+            f"--script-opts=cabletv-port={self.config.web.port}",
             # Cache settings for network share playback
             "--cache=yes",
             "--cache-secs=10",
