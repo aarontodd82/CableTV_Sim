@@ -38,12 +38,33 @@ class RemoteScheduleProvider(ScheduleEngine):
             when = datetime.now() + self._clock_offset
         return super().what_is_on(channel_number, when)
 
-    def get_upcoming(self, channel_number: int, count: int = 3,
-                     after_time=None):
+    def get_upcoming(self, channel_number: int, count: int = 3):
         """Get upcoming programs, adjusted to server's clock."""
-        if after_time is None:
-            after_time = datetime.now() + self._clock_offset
-        return super().get_upcoming(channel_number, count, after_time)
+        now = datetime.now() + self._clock_offset
+        current = self.what_is_on(channel_number, now)
+        if not current:
+            return []
+
+        upcoming = []
+        scan_time = current.entry.slot_end_time
+
+        for _ in range(count):
+            future = self.what_is_on(
+                channel_number, scan_time + timedelta(seconds=0.1)
+            )
+            if not future:
+                break
+            entry = future.entry
+            if entry.series_name:
+                title = entry.series_name
+            elif entry.artist:
+                title = f"{entry.artist} - {entry.title}"
+            else:
+                title = entry.title
+            upcoming.append((future.entry.start_time, title))
+            scan_time = future.entry.slot_end_time
+
+        return upcoming
 
     def get_guide_data(self, start_time=None, hours: int = 3,
                        channels=None):
