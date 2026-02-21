@@ -472,8 +472,8 @@ class ScheduleEngine:
         groups: list[ContentGroup] = []
         for series_name, items in series_map.items():
             sorted_items = sorted(items, key=lambda c: (
-                c.get("season") or 0,
-                c.get("episode") or 0,
+                int(c.get("season") or 0),
+                str(c.get("episode") or 0).zfill(5),
                 c["id"],
             ))
             groups.append(ContentGroup(

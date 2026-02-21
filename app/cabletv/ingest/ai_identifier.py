@@ -11,7 +11,8 @@ from ..config import Config
 from ..db import (
     db_connection, get_content_by_status, update_content_status,
     update_content_metadata, add_tag_to_content, get_content_tags,
-    get_all_series_tags, log_ingest
+    get_all_series_tags, log_ingest, remove_tag_from_content,
+    clear_content_tags
 )
 from .identifier import TMDBClient
 
@@ -112,33 +113,86 @@ SYSTEM_PROMPT = """\
 You are a media librarian identifying video files for a cable TV simulator. You receive batches of filenames grouped by directory.
 
 Your job:
-1. Examine each filename and its directory path to determine what the content is (movie or TV show).
+1. Examine each filename and its directory path to determine what the content is.
 2. Use the TMDB tools to verify your identification. For TV series, search once per series (not per episode).
 3. Return a JSON array with one entry per file, in the same order as the input.
 
 Each entry in your JSON response must have these fields:
 - "index": integer, the 0-based index matching the input list
-- "content_type": "movie" or "show"
-- "title": display title (for shows: "Series Name S01E03", for movies: "Movie Name")
-- "series_name": series name for shows, null for movies
-- "season": season number for shows, null for movies
-- "episode": episode number for shows, null for movies
+- "content_type": "movie", "show", "commercial", or "bumper"
+- "title": display title (shows: "Series Name S01E03", movies: "Movie Name (Year)")
+- "series_name": series name for shows, null for movies/commercials/bumpers
+- "season": season number for shows, null otherwise
+- "episode": episode number for shows, null otherwise
 - "year": release year (from TMDB if found, parsed from filename otherwise)
 - "tmdb_id": TMDB ID if found, null otherwise
-- "tags": array of exactly 2 genre tags from this valid set: action, adventure, animation, comedy, crime, documentary, drama, educational, family, fantasy, gameshow, history, horror, kids, music, mystery, romance, scifi, thriller, western, classic, disney, sitcom, sports. Only use 3 tags if there is a very strong reason (e.g. an animated kids comedy). ADDITIONALLY: if the content was released before 1980, add "classic" as a bonus tag. If the content is produced by Walt Disney Pictures, Walt Disney Animation Studios, or Pixar (or is a Disney Channel original), add "disney" as a bonus tag. These bonus tags stack on top of the normal 2 genre tags.
-- "skip": true if this file should be skipped (not a movie/show, e.g. samples, extras), false otherwise
+- "tags": array of genre tags (see TAGGING RULES below). For commercials/bumpers: empty array [].
+- "skip": true ONLY for junk files (samples, extras, behind-the-scenes, .nfo, artwork). NOT for commercials/bumpers — classify those properly instead.
 
-Guidelines:
+VALID TAGS: action, adventure, animation, comedy, crime, documentary, drama, educational, family, fantasy, gameshow, history, horror, kids, mystery, romance, scifi, sitcom, sports, thriller, western
+BONUS TAGS (added ON TOP of the 2 base tags): classic (pre-1980 content), disney (Disney/Pixar productions), music (music content only)
+
+CONTENT TYPE RULES:
+- "movie": Feature films, TV movies, standalone specials
+- "show": TV series episodes (identified by S01E01, 1x01, season/episode numbering, or TMDB)
+- "commercial": Short clips (typically < 120s) that are advertisements, promos, station IDs, network idents
+- "bumper": Very short clips (typically < 30s) — channel bumpers, "we'll be right back" clips, network transitions
+- If the provided type says "commercial" or "bumper" but it's clearly a full TV episode or movie, OVERRIDE it to the correct type
+
+CRITICAL TAGGING RULES:
+1. Every movie and show MUST have exactly 2 base tags. Pick the 2 most defining genres. No more, no fewer (before bonus tags).
+2. ANIMATION: Any animated content (cartoons, anime, CGI animation) MUST include "animation" as one of its 2 base tags. Examples: The Simpsons = animation, comedy. Batman: The Animated Series = animation, action. Toy Story = animation, family + disney bonus.
+3. SITCOM: Live-action situation comedies MUST use "sitcom" as one of their 2 base tags. Examples: Seinfeld = sitcom, comedy. Friends = sitcom, comedy. The Fresh Prince = sitcom, comedy + family.
+4. KIDS: Content specifically made for children (Sesame Street, Barney, Teletubbies, Nickelodeon/PBS Kids shows) MUST include "kids" as one tag. Can combine: Rugrats = animation, kids.
+5. CLASSIC bonus: Pre-1980 content gets "classic" as a bonus tag (3 total). Post-1980 content NEVER gets "classic".
+6. DISNEY bonus: Walt Disney Pictures, Walt Disney Animation, Pixar, Disney Channel originals get "disney" as a bonus tag.
+7. MUSIC tag: ONLY for music video content. NEVER use "music" for movies/shows about musicians or with soundtracks.
+8. Do NOT duplicate tags. "animation, animation" is wrong.
+
+EXAMPLES:
+- The Simpsons S03E05 → content_type: "show", tags: ["animation", "comedy"]
+- Seinfeld S04E11 → content_type: "show", tags: ["sitcom", "comedy"]
+- Rugrats S02E01 → content_type: "show", tags: ["animation", "kids"]
+- The X-Files S01E01 → content_type: "show", tags: ["scifi", "mystery"]
+- Law & Order S05E10 → content_type: "show", tags: ["crime", "drama"]
+- Toy Story (1995) → content_type: "movie", tags: ["animation", "family", "disney"]
+- Casablanca (1942) → content_type: "movie", tags: ["drama", "romance", "classic"]
+- Coca-Cola ad (30s clip) → content_type: "commercial", tags: []
+- NBC bumper (5s clip) → content_type: "bumper", tags: []
+- LA Confidential (1997) → content_type: "movie", tags: ["crime", "thriller"] (NOT a commercial despite "confidential" in name)
+
+GUIDELINES:
 - Parse S01E02 / 1x02 / Season 1 Episode 2 patterns from filenames
 - Files numbered like "1. Show Name - Episode Title.flv" are TV episodes — use the directory name for season info
 - Use directory names for context (e.g. "Breaking Bad/Season 3/" tells you the series and season)
-- For movies, include the year in the title if known: "The Matrix (1999)"
-- Pick the 2 most defining tags. Quality over quantity.
 - Be efficient: search TMDB once per unique series/movie, not per episode
-- Skip sample files, extras, behind-the-scenes, etc.
 - If a file is ambiguous and TMDB search returns no results, make your best guess from the filename
 
 IMPORTANT: Respond with ONLY the JSON array. No markdown, no explanation, no commentary. Just [ ... ]."""
+
+REVIEW_SYSTEM_PROMPT = """\
+You are a media librarian reviewing content that was flagged for tagging issues in a cable TV simulator.
+
+Each item has already been identified (title, type, year are known). Your job is ONLY to assign correct tags.
+
+VALID TAGS: action, adventure, animation, comedy, crime, documentary, drama, educational, family, fantasy, gameshow, history, horror, kids, mystery, romance, scifi, sitcom, sports, thriller, western
+BONUS TAGS (added ON TOP of 2 base tags): classic (pre-1980), disney (Disney/Pixar)
+
+RULES:
+1. Every movie and show MUST have exactly 2 base tags (before bonus tags).
+2. ANIMATION: Cartoons, anime, CGI → MUST include "animation". Simpsons = animation, comedy. Toy Story = animation, family.
+3. SITCOM: Live-action sitcoms → MUST include "sitcom". Seinfeld = sitcom, comedy. Friends = sitcom, comedy.
+4. KIDS: Children's shows (Sesame Street, Barney, Nickelodeon, PBS Kids) → MUST include "kids". Rugrats = animation, kids.
+5. Pre-1980 content gets "classic" bonus. Post-1980 NEVER gets "classic".
+6. Disney/Pixar gets "disney" bonus.
+7. "music" is ONLY for music videos. Never for movies/shows about musicians.
+
+You will receive a list of items with their current tags and the reason they were flagged.
+Return a JSON array with one entry per item:
+- "id": the content ID
+- "tags": corrected array of tags (2 base + any applicable bonus tags)
+
+IMPORTANT: Respond with ONLY the JSON array. No markdown, no explanation. Just [ ... ]."""
 
 
 def _execute_tool(client: TMDBClient, name: str, args: dict) -> str:
@@ -403,6 +457,198 @@ def _process_batch(
     return None
 
 
+# Tags that count as "base" tags (not bonus tags)
+_BONUS_TAGS = {"classic", "disney"}
+_BASE_TAGS = VALID_TAGS - _BONUS_TAGS - {"music"}
+
+
+def _validate_and_fix_tags(conn, config: Config, verbose: bool = True) -> list[dict]:
+    """Post-identification validation: enforce tagging rules in code.
+
+    Runs after all AI batches complete. Auto-fixes what it can,
+    returns a list of flagged items that need AI review.
+
+    Returns:
+        List of dicts: [{"id": int, "title": str, "content_type": str,
+                         "year": int|None, "tags": [str], "reason": str}]
+    """
+    flagged = []
+    auto_fixed = 0
+
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, title, content_type, year, series_name
+        FROM content WHERE status IN ('identified', 'ready')
+        AND content_type IN ('movie', 'show')
+    """)
+    items = cursor.fetchall()
+
+    for item in items:
+        cid = item["id"]
+        tags = get_content_tags(conn, cid)
+        year = item["year"]
+        ctype = item["content_type"]
+        changed = False
+
+        # Rule: Remove "music" tag from non-music content
+        if "music" in tags and ctype != "music":
+            remove_tag_from_content(conn, cid, "music")
+            tags = [t for t in tags if t != "music"]
+            changed = True
+
+        # Rule: Pre-1980 movies missing "classic" → auto-add
+        if ctype == "movie" and year and year < 1980 and "classic" not in tags:
+            add_tag_to_content(conn, cid, "classic")
+            tags.append("classic")
+            changed = True
+
+        # Rule: Post-1980 content has "classic" → auto-remove
+        if year and year >= 1980 and "classic" in tags:
+            remove_tag_from_content(conn, cid, "classic")
+            tags = [t for t in tags if t != "classic"]
+            changed = True
+
+        if changed:
+            auto_fixed += 1
+
+        # Count base tags (excluding bonus tags)
+        base_tags = [t for t in tags if t in _BASE_TAGS]
+
+        # Flag: fewer than 2 base tags → needs AI review
+        if len(base_tags) < 2:
+            flagged.append({
+                "id": cid,
+                "title": item["title"],
+                "content_type": ctype,
+                "year": year,
+                "series_name": item["series_name"],
+                "tags": tags,
+                "reason": f"Only {len(base_tags)} base tag(s): {', '.join(base_tags) or '(none)'}",
+            })
+
+    # Reachability check (informational warning)
+    if verbose and config.channels:
+        # Build map of which tag+type combos reach a channel
+        reachable_tags = set()
+        for ch in config.channels:
+            for tag in ch.tags:
+                for ct in ch.content_types:
+                    reachable_tags.add((tag, ct))
+
+        cursor.execute("""
+            SELECT c.id, c.title, c.content_type FROM content c
+            WHERE c.status IN ('identified', 'ready')
+            AND c.content_type IN ('movie', 'show')
+        """)
+        unreachable_count = 0
+        for row in cursor.fetchall():
+            row_tags = get_content_tags(conn, row["id"])
+            ct = row["content_type"]
+            if not any((t, ct) in reachable_tags for t in row_tags):
+                unreachable_count += 1
+
+        if unreachable_count > 0:
+            print(f"\n  Warning: {unreachable_count} items have tags+type that don't reach any channel")
+
+    if verbose:
+        if auto_fixed:
+            print(f"\n  Validation auto-fixed {auto_fixed} items (classic/music tag rules)")
+        if flagged:
+            print(f"  Validation flagged {len(flagged)} items for AI review (too few base tags)")
+
+    return flagged
+
+
+def _ai_review_flagged(
+    anthropic_client,
+    flagged: list[dict],
+    conn,
+    verbose: bool = True,
+) -> int:
+    """Send flagged items to Claude for tag correction.
+
+    Args:
+        anthropic_client: Anthropic API client
+        flagged: List of flagged item dicts from _validate_and_fix_tags
+        conn: Database connection
+        verbose: Print progress
+
+    Returns:
+        Number of items corrected
+    """
+    if not flagged:
+        return 0
+
+    # Build message listing all flagged items
+    lines = ["Items that need corrected tags:", ""]
+    for i, item in enumerate(flagged):
+        year_str = f" ({item['year']})" if item.get("year") else ""
+        series_str = f" [series: {item['series_name']}]" if item.get("series_name") else ""
+        lines.append(
+            f"  [{i}] id={item['id']}  {item['content_type']}  "
+            f"\"{item['title']}\"{year_str}{series_str}  "
+            f"current tags: [{', '.join(item['tags'])}]  "
+            f"reason: {item['reason']}"
+        )
+
+    user_message = "\n".join(lines)
+
+    if verbose:
+        print(f"\n  Sending {len(flagged)} flagged items for AI review...")
+
+    try:
+        response = anthropic_client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=4096,
+            system=REVIEW_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_message}],
+        )
+
+        text = "\n".join(b.text for b in response.content if b.type == "text")
+        results = _parse_response(text)
+
+        if not results:
+            if verbose:
+                print("  AI review: failed to parse response")
+            return 0
+
+        corrected = 0
+        for entry in results:
+            item_id = entry.get("id")
+            new_tags = entry.get("tags", [])
+
+            # Validate tags
+            valid_new = [t.lower().strip() for t in new_tags if t.lower().strip() in VALID_TAGS]
+            base_new = [t for t in valid_new if t in _BASE_TAGS]
+
+            if len(base_new) < 2:
+                continue  # AI didn't fix it properly, skip
+
+            # Find the flagged item
+            item = next((f for f in flagged if f["id"] == item_id), None)
+            if not item:
+                continue
+
+            # Replace all tags
+            clear_content_tags(conn, item_id)
+            for tag in valid_new:
+                add_tag_to_content(conn, item_id, tag)
+
+            corrected += 1
+            if verbose:
+                print(f"    Fixed id={item_id}: {', '.join(item['tags'])} → {', '.join(valid_new)}")
+
+        if verbose:
+            print(f"  AI review corrected {corrected}/{len(flagged)} items")
+
+        return corrected
+
+    except Exception as e:
+        if verbose:
+            print(f"  AI review error: {e}")
+        return 0
+
+
 def ai_identify_content(config: Config, verbose: bool = True) -> dict:
     """
     Identify scanned content using Claude AI with TMDB tool use.
@@ -453,16 +699,22 @@ def ai_identify_content(config: Config, verbose: bool = True) -> dict:
         if verbose:
             print(f"Found {len(content_list)} items to identify")
 
-        # Skip commercials/bumpers first; group music separately
+        # Separate music; auto-skip only confirmed commercials from commercials/ dir
         regular_content = []
         music_content = []
         for content in content_list:
-            if content["content_type"] in ("commercial", "bumper"):
+            orig = (content["original_path"] or "").lower().replace("\\", "/")
+            is_from_commercials_dir = "commercials/originals/" in orig or "commercials\\originals\\" in content["original_path"].lower()
+            is_short = content["duration_seconds"] < 120
+
+            if content["content_type"] == "commercial" and is_from_commercials_dir and is_short:
+                # Confirmed commercial from commercials directory — skip AI
                 update_content_status(conn, content["id"], "identified")
                 stats["skipped"] += 1
             elif content["content_type"] == "music":
                 music_content.append(content)
             else:
+                # Everything else goes to AI (including mistyped commercials/bumpers)
                 regular_content.append(content)
 
         # Merge music back into regular for AI processing (they get a different prompt)
@@ -470,7 +722,7 @@ def ai_identify_content(config: Config, verbose: bool = True) -> dict:
 
         if not regular_content:
             if verbose:
-                print("All items are commercials/bumpers, skipped")
+                print("All items are confirmed commercials, skipped")
             return stats
 
         # Load existing series tags for consistency (preventative)
@@ -576,6 +828,10 @@ def ai_identify_content(config: Config, verbose: bool = True) -> dict:
                             ", ".join(valid_tags), "OK"
                         ))
 
+                        # Incremental series_tags update: first batch wins
+                        if series_name and valid_tags and series_name not in series_tags:
+                            series_tags[series_name] = valid_tags
+
                 except Exception as e:
                     if verbose:
                         print(f"  Batch error: {e}")
@@ -583,6 +839,17 @@ def ai_identify_content(config: Config, verbose: bool = True) -> dict:
                         stats["errors"] += 1
                         review_log.append((f["id"], f["filename"], "", "", "", "ERROR"))
                     log_ingest(conn, "ai_identify", "failed", message=str(e))
+
+        # Post-identification validation and AI review
+        if stats["identified"] > 0:
+            if verbose:
+                print("\nRunning post-identification validation...")
+            flagged = _validate_and_fix_tags(conn, config, verbose=verbose)
+            if flagged:
+                corrected = _ai_review_flagged(
+                    anthropic_client, flagged, conn, verbose=verbose
+                )
+                stats["validated"] = corrected
 
         log_ingest(conn, "ai_identify", "completed",
                    message=f"Identified {stats['identified']}, skipped {stats['skipped']}, errors {stats['errors']}")

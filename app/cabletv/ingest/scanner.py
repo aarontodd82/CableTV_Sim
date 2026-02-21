@@ -26,18 +26,15 @@ def detect_content_type(path: Path) -> str:
     """
     Detect content type from path and filename.
 
-    Returns: 'movie', 'show', 'commercial', 'bumper', or 'music'
+    Returns: 'music', 'show', or 'movie'.
+    Commercial/bumper classification is handled by content_type_override
+    (for the commercials/ directory) or by the AI identifier.
     """
     path_str = str(path).lower()
-    path_parts = [p.lower() for p in path.parts]
 
-    # Check path components (music first — music dirs may contain "ads" in filenames)
+    # Music detection (safe — no false positives from regular content)
     if "music video" in path_str or "music_video" in path_str or "music collection" in path_str:
         return "music"
-    if "commercial" in path_str or "ads" in path_parts or "commercials" in path_parts:
-        return "commercial"
-    if "bumper" in path_str or "ident" in path_str:
-        return "bumper"
 
     # Check for TV show patterns (S01E01, 1x01, etc.)
     filename = path.stem
