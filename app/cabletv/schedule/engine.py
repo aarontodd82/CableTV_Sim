@@ -22,7 +22,7 @@ from .commercials import get_current_commercial, calculate_slot_breakdown
 @dataclass
 class TimelineSegment:
     """A segment in the content block timeline."""
-    segment_type: str  # "content", "commercial", or "info_bumper"
+    segment_type: str  # "content" or "commercial"
     start_offset: float  # Seconds from block start
     duration: float  # Duration of this segment
     # For content segments:
@@ -41,11 +41,6 @@ class ContentGroup:
     is_standalone: bool  # True for single-item groups (movies, standalone content)
 
 
-# Guaranteed info bumper duration range (seconds)
-INFO_BUMPER_MIN = 5.0
-INFO_BUMPER_MAX = 8.0
-
-
 def build_content_timeline(
     content_duration: float,
     break_points: list[float],
@@ -57,16 +52,16 @@ def build_content_timeline(
 
     The timeline interleaves content segments with commercial breaks at the
     detected break points, plus end-of-slot padding. Commercial time is
-    distributed evenly across all breaks. Every break gets an info bumper
-    (carved from commercial time) showing what's on and what's coming up.
-    Break points are capped and spread evenly for long content with many
-    detected breaks.
+    distributed evenly across all breaks. Break points are capped and
+    spread evenly for long content with many detected breaks. Unfilled
+    time at the end of each break naturally becomes an info bumper
+    (standby) showing current and upcoming programs.
 
     Args:
         content_duration: Duration of the main content in seconds
         break_points: List of timestamps (in content time) where breaks occur
         total_slot_duration: Total duration of the slot allocation
-        seed: Seed for deterministic info bumper placement
+        seed: Seed for deterministic selection
 
     Returns:
         List of TimelineSegment objects covering the entire slot duration
@@ -91,18 +86,11 @@ def build_content_timeline(
     # Distribute commercial time evenly across all breaks
     commercial_per_break = total_commercial_time / num_breaks if num_breaks > 0 else 0
 
-    # Every break gets an info bumper (carved from commercial time).
-    bumper_duration = 0.0
-    if commercial_per_break >= INFO_BUMPER_MIN:
-        bumper_duration = min(INFO_BUMPER_MAX, commercial_per_break / 2)
-        bumper_duration = max(INFO_BUMPER_MIN, bumper_duration)
-        bumper_duration = min(bumper_duration, commercial_per_break)
-
     segments: list[TimelineSegment] = []
     current_offset = 0.0
     content_position = 0.0
 
-    # Build segments: content, commercial (+info_bumper), content, ...
+    # Build segments: content, commercial, content, ...
     for i, break_point in enumerate(valid_breaks):
         # Content segment up to this break point
         content_segment_duration = break_point - content_position
@@ -115,30 +103,15 @@ def build_content_timeline(
             ))
             current_offset += content_segment_duration
 
-        # Commercial break (shortened to make room for info bumper)
+        # Commercial break
         if commercial_per_break > 0:
-            comm_dur = commercial_per_break
-            if bumper_duration > 0:
-                comm_dur -= bumper_duration
-
-            if comm_dur > 0:
-                segments.append(TimelineSegment(
-                    segment_type="commercial",
-                    start_offset=current_offset,
-                    duration=comm_dur,
-                    break_index=i,
-                ))
-                current_offset += comm_dur
-
-            # Info bumper at end of every break
-            if bumper_duration > 0:
-                segments.append(TimelineSegment(
-                    segment_type="info_bumper",
-                    start_offset=current_offset,
-                    duration=bumper_duration,
-                    break_index=i,
-                ))
-                current_offset += bumper_duration
+            segments.append(TimelineSegment(
+                segment_type="commercial",
+                start_offset=current_offset,
+                duration=commercial_per_break,
+                break_index=i,
+            ))
+            current_offset += commercial_per_break
 
         content_position = break_point
 
@@ -156,26 +129,12 @@ def build_content_timeline(
     # End-of-slot commercial padding
     end_break_idx = len(valid_breaks)
     if commercial_per_break > 0:
-        comm_dur = commercial_per_break
-        if bumper_duration > 0:
-            comm_dur -= bumper_duration
-
-        if comm_dur > 0:
-            segments.append(TimelineSegment(
-                segment_type="commercial",
-                start_offset=current_offset,
-                duration=comm_dur,
-                break_index=end_break_idx,
-            ))
-            current_offset += comm_dur
-
-        if bumper_duration > 0:
-            segments.append(TimelineSegment(
-                segment_type="info_bumper",
-                start_offset=current_offset,
-                duration=bumper_duration,
-                break_index=end_break_idx,
-            ))
+        segments.append(TimelineSegment(
+            segment_type="commercial",
+            start_offset=current_offset,
+            duration=commercial_per_break,
+            break_index=end_break_idx,
+        ))
 
     return segments
 
@@ -199,7 +158,7 @@ def build_multi_episode_timeline(
     Args:
         episodes: List of (duration, break_points) per episode
         total_slot_duration: Total duration of the slot allocation
-        seed: Seed for deterministic info bumper placement
+        seed: Seed for deterministic selection
 
     Returns:
         List of TimelineSegment objects covering the entire slot duration
@@ -220,13 +179,6 @@ def build_multi_episode_timeline(
 
     commercial_per_break = total_commercial_time / all_break_slots if all_break_slots > 0 else 0
 
-    # Info bumper sizing (same logic as single-episode)
-    bumper_duration = 0.0
-    if commercial_per_break >= INFO_BUMPER_MIN:
-        bumper_duration = min(INFO_BUMPER_MAX, commercial_per_break / 2)
-        bumper_duration = max(INFO_BUMPER_MIN, bumper_duration)
-        bumper_duration = min(bumper_duration, commercial_per_break)
-
     segments: list[TimelineSegment] = []
     current_offset = 0.0
     break_counter = 0  # Global break index for deterministic commercial selection
@@ -235,25 +187,13 @@ def build_multi_episode_timeline(
         nonlocal current_offset, break_counter
         if commercial_per_break <= 0:
             return
-        comm_dur = commercial_per_break
-        if bumper_duration > 0:
-            comm_dur -= bumper_duration
-        if comm_dur > 0:
-            segments.append(TimelineSegment(
-                segment_type="commercial",
-                start_offset=current_offset,
-                duration=comm_dur,
-                break_index=break_counter,
-            ))
-            current_offset += comm_dur
-        if bumper_duration > 0:
-            segments.append(TimelineSegment(
-                segment_type="info_bumper",
-                start_offset=current_offset,
-                duration=bumper_duration,
-                break_index=break_counter,
-            ))
-            current_offset += bumper_duration
+        segments.append(TimelineSegment(
+            segment_type="commercial",
+            start_offset=current_offset,
+            duration=commercial_per_break,
+            break_index=break_counter,
+        ))
+        current_offset += commercial_per_break
         break_counter += 1
 
     for ep_idx, (ep_dur, ep_breaks) in enumerate(episodes):
@@ -1100,25 +1040,6 @@ class ScheduleEngine:
                 commercial=None,
                 pack_count=pack_count,
             )
-        elif current_segment.segment_type == "info_bumper":
-            # Info bumper — black screen with mini-guide
-            remaining_in_segment = current_segment.duration - offset_in_segment
-            # Detect if this is the end-of-slot bumper (last break_index in timeline)
-            max_break_idx = max(
-                (s.break_index for s in timeline
-                 if s.segment_type in ("commercial", "info_bumper")),
-                default=0)
-            is_end = current_segment.break_index >= max_break_idx
-            return NowPlaying(
-                entry=entry,
-                elapsed_seconds=elapsed,
-                remaining_seconds=remaining_in_segment,
-                seek_position=0,
-                is_commercial=True,
-                commercial=None,  # Triggers info bumper display in playback engine
-                is_end_bumper=is_end,
-                pack_count=pack_count,
-            )
         else:
             # We're in a commercial break
             break_duration = current_segment.duration
@@ -1136,17 +1057,24 @@ class ScheduleEngine:
 
             remaining_in_segment = current_segment.duration - offset_in_segment
 
+            # Detect if this is the last break in the slot (for end-of-slot bumper display)
+            max_break_idx = max(
+                (s.break_index for s in timeline if s.segment_type == "commercial"),
+                default=0)
+            is_end = current_segment.break_index >= max_break_idx
+
             if commercial_info:
                 # Check if this is a standby placeholder (dead air filler)
                 if commercial_info.get("is_standby"):
-                    # Standby mode - no actual commercial to play
+                    # Standby — show info bumper with current/upcoming programs
                     return NowPlaying(
                         entry=entry,
                         elapsed_seconds=elapsed,
                         remaining_seconds=commercial_info["remaining"],
                         seek_position=0,
                         is_commercial=True,
-                        commercial=None,  # Triggers standby display in playback engine
+                        commercial=None,
+                        is_end_bumper=is_end,
                         pack_count=pack_count,
                     )
 
@@ -1174,7 +1102,7 @@ class ScheduleEngine:
                     pack_count=pack_count,
                 )
             else:
-                # No commercials available - return with no commercial to play
+                # No commercials available — show info bumper
                 return NowPlaying(
                     entry=entry,
                     elapsed_seconds=elapsed,
@@ -1182,6 +1110,7 @@ class ScheduleEngine:
                     seek_position=0,
                     is_commercial=True,
                     commercial=None,
+                    is_end_bumper=is_end,
                     pack_count=pack_count,
                 )
 
