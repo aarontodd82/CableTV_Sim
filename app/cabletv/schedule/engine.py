@@ -440,6 +440,16 @@ class ScheduleEngine:
         self._type_avg_durations.clear()
         self._break_point_cache.clear()
 
+    def refresh(self) -> None:
+        """Clear all caches and force position reload from database.
+
+        Used by the guide generator to ensure each generation cycle
+        starts with the latest series positions and fresh cache state.
+        """
+        self.clear_cache()
+        self._positions_loaded = False
+        self._positions.clear()
+
     def _load_positions(self) -> None:
         """Lazy-load all series positions from the database."""
         if self._positions_loaded:
