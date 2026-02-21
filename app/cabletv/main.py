@@ -196,16 +196,13 @@ class CableTVSystem:
 
         # Step 6: Create remote schedule provider (thin API client)
         # No local engine — all schedule queries go to the server.
-        # Pass channel numbers so it can prefetch surrounding channels.
-        channel_numbers = [ch.number for ch in self.config.channels]
         self.schedule = RemoteScheduleProvider(
             self._server_connection.server_url,
             clock_offset=clock_offset,
             epoch=self.config.schedule.epoch,
             slot_duration=self.config.schedule.slot_duration,
-            channel_numbers=channel_numbers,
         )
-        print("  Schedule provider ready (server API + prefetch cache)")
+        print("  Schedule provider ready (server API)")
 
         # Step 7: Create playback engine with HTTP streaming
         media_url = f"{self._server_connection.server_url}/media"
