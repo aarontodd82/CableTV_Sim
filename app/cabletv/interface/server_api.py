@@ -167,12 +167,40 @@ def schedule_data():
     # Positions
     positions = _server_manager.get_all_positions()
 
+    # Block cache snapshot — the server's playback engine advances positions
+    # on first sight (when content starts playing), but the block cache still
+    # holds the pre-advance content selection. Without this, the remote
+    # computes fresh with post-advance positions and gets the next episode.
+    # Sending the current block cache entries lets the remote's
+    # _find_block_start() hit the cache identically to the server.
+    from ..utils.time_utils import get_slot_number, slots_needed
+    from datetime import datetime as _dt
+    now = _dt.now()
+    block_cache_snapshot = {}
+    for ch in _config.channels:
+        ch_num = ch.number
+        current_slot = get_slot_number(now, engine.epoch, engine.slot_duration)
+        cache_key = (ch_num, current_slot)
+        cached = engine._block_cache.get(cache_key)
+        if cached:
+            start_slot, content = cached
+            if content:
+                # Send all slots in this block so the remote covers the
+                # full span (walk-forward checks intermediate slots too)
+                block_cache_snapshot[f"{ch_num}:{start_slot}"] = {
+                    "content_id": content["id"],
+                    "start_slot": start_slot,
+                    "slots": slots_needed(
+                        content["duration_seconds"], engine.slot_duration),
+                }
+
     payload = json.dumps({
         "content_items": {str(k): v for k, v in content_items.items()},
         "channel_pool_ids": channel_pool_ids,
         "break_points": break_points,
         "commercials": commercials,
         "positions": positions,
+        "block_cache": block_cache_snapshot,
     })
     compressed = gzip.compress(payload.encode(), compresslevel=1)
     response = make_response(compressed)

@@ -87,6 +87,30 @@ class RemoteScheduleProvider(ScheduleEngine):
         from .commercials import set_commercial_pool
         set_commercial_pool(commercials)
 
+        # Pre-populate block cache from server snapshot.
+        # The server's playback engine advances positions on first sight,
+        # but the block cache retains the pre-advance content. Without
+        # this, we'd compute fresh with post-advance positions and get
+        # the next episode instead of what's actually airing.
+        block_cache = data.get("block_cache", {})
+        for key_str, info in block_cache.items():
+            parts = key_str.split(":", 1)
+            if len(parts) != 2:
+                continue
+            ch_num = int(parts[0])
+            start_slot = info["start_slot"]
+            cid = info["content_id"]
+            num_slots = info["slots"]
+            # Find the content dict in this channel's pool
+            content = None
+            for item in self._channel_pools.get(ch_num, []):
+                if item["id"] == cid:
+                    content = item
+                    break
+            if content:
+                for s in range(start_slot, start_slot + num_slots):
+                    self._block_cache[(ch_num, s)] = (start_slot, content)
+
         pool_count = sum(len(ids) for ids in channel_pool_ids.values())
         bp_count = sum(len(b) for b in break_points.values())
         print(f"  Schedule data: {len(content_items)} unique items "
