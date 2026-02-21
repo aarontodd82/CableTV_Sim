@@ -176,21 +176,24 @@ class PlaybackEngine:
                     # First time seeing this episode on this channel — advance it
                     self._seen_content[channel_number] = content_id
                     entry = now_playing.entry
-                    gk = entry.series_name if entry.series_name else f"standalone_{entry.content_id}"
-                    ch_config = self.config.channel_map.get(channel_number)
-                    group_size = 1
-                    if ch_config:
-                        for g in self.schedule.get_channel_groups(ch_config):
-                            if g.group_key == gk:
-                                group_size = len(g.items)
-                                break
-                    # Calculate block start slot so advance_position can
-                    # preserve this block's cache entries (prevents re-tune
-                    # mid-slot from jumping to the next episode)
-                    block_start_slot = get_slot_number(
-                        entry.start_time,
-                        self.schedule.epoch,
-                        self.schedule.slot_duration)
+
+                    # Use pre-computed advance_info from server API if available
+                    # (remote mode), otherwise compute locally (standalone/server)
+                    if now_playing.advance_info:
+                        gk, group_size, block_start_slot = now_playing.advance_info
+                    else:
+                        gk = entry.series_name if entry.series_name else f"standalone_{entry.content_id}"
+                        ch_config = self.config.channel_map.get(channel_number)
+                        group_size = 1
+                        if ch_config:
+                            for g in self.schedule.get_channel_groups(ch_config):
+                                if g.group_key == gk:
+                                    group_size = len(g.items)
+                                    break
+                        block_start_slot = get_slot_number(
+                            entry.start_time,
+                            self.schedule.epoch,
+                            self.schedule.slot_duration)
                     advance_info = (content_id, gk, group_size, block_start_slot,
                                     now_playing.pack_count)
 

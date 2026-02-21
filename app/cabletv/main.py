@@ -119,9 +119,9 @@ class CableTVSystem:
     def _initialize_remote(self) -> bool:
         """Initialize in remote mode — connect to server, use shared content.
 
-        All schedule data (content pools, break points, commercials,
-        positions) is fetched from the server API. No database copy
-        needed — eliminates WAL sync issues entirely.
+        The server is the single source of truth for all schedule decisions.
+        The remote just asks "what's on channel X?" via API calls. No local
+        schedule engine, no replicated state, no sync issues.
         """
         from pathlib import Path
         from .network.client import ServerConnection
@@ -141,17 +141,14 @@ class CableTVSystem:
             return False
         print(f"  Connected to server: {self._server_connection.server_url}")
 
-        # Step 2: Get server info
+        # Step 2: Get server info (channels, config)
         server_info = self._server_connection.get_server_info()
         if not server_info:
             print("Error: Could not get server info.")
             return False
+        print(f"  Server seed: {server_info['seed']}")
 
-        seed = server_info["seed"]
-        print(f"  Server seed: {seed}")
-
-        # Sync schedule params from server — epoch and slot_duration MUST
-        # match or slot calculations diverge (different content everywhere).
+        # Sync schedule params from server
         if "epoch" in server_info:
             self.config.schedule.epoch = server_info["epoch"]
         if "slot_duration" in server_info:
@@ -197,23 +194,20 @@ class CableTVSystem:
         else:
             print(f"  Clock offset: {clock_offset:+.3f}s (in sync)")
 
-        # Step 6: Create remote schedule provider (local engine with server's seed)
+        # Step 6: Create remote schedule provider (thin API client)
+        # No local engine — all schedule queries go to the server.
+        # Pass channel numbers so it can prefetch surrounding channels.
+        channel_numbers = [ch.number for ch in self.config.channels]
         self.schedule = RemoteScheduleProvider(
-            self.config,
             self._server_connection.server_url,
-            seed,
             clock_offset=clock_offset,
+            epoch=self.config.schedule.epoch,
+            slot_duration=self.config.schedule.slot_duration,
+            channel_numbers=channel_numbers,
         )
+        print("  Schedule provider ready (server API + prefetch cache)")
 
-        # Step 7: Load all schedule data from server API
-        # This pre-populates all caches (content pools, break points,
-        # commercials, positions) so the engine never touches a database.
-        if not self.schedule.load_server_data():
-            print("Error: Could not load schedule data from server.")
-            return False
-        print("  Schedule engine ready (remote, local computation)")
-
-        # Step 8: Create playback engine with HTTP streaming
+        # Step 7: Create playback engine with HTTP streaming
         media_url = f"{self._server_connection.server_url}/media"
         self.playback = PlaybackEngine(
             self.config, self.schedule, content_root=content_root,

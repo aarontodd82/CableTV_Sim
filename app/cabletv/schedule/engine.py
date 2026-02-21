@@ -378,6 +378,10 @@ class NowPlaying:
     commercial: Optional[CommercialEntry] = None
     is_end_bumper: bool = False
     pack_count: int = 1  # Number of episodes in a packed block (for position advancement)
+    # Pre-computed advance info from server (remote mode only).
+    # Tuple of (group_key, group_size, block_start_slot) — avoids
+    # the remote needing to call get_channel_groups() locally.
+    advance_info: Optional[tuple] = None
 
     @property
     def slot_remaining_seconds(self) -> float:
