@@ -84,6 +84,31 @@ def clear_commercial_cache() -> None:
     _cache = None
 
 
+def set_commercial_pool(pool: list[dict]) -> None:
+    """Pre-populate the commercial cache from a list of dicts.
+
+    Used by remote mode to load commercials from the server API
+    instead of querying the local database.
+    """
+    global _cache
+    if not pool:
+        _cache = CommercialCache(
+            pool=[], by_duration=[], durations=[],
+            shortest=0.0, longest=0.0,
+        )
+        return
+
+    by_duration = sorted(pool, key=lambda c: c["duration_seconds"])
+    durations = [c["duration_seconds"] for c in by_duration]
+    _cache = CommercialCache(
+        pool=pool,
+        by_duration=by_duration,
+        durations=durations,
+        shortest=durations[0],
+        longest=durations[-1],
+    )
+
+
 def get_commercials_for_break(
     break_duration_seconds: float,
     channel_number: int,

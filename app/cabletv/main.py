@@ -117,14 +117,16 @@ class CableTVSystem:
         return True
 
     def _initialize_remote(self) -> bool:
-        """Initialize in remote mode — connect to server, use shared content."""
-        import shutil
-        import tempfile
+        """Initialize in remote mode — connect to server, use shared content.
+
+        All schedule data (content pools, break points, commercials,
+        positions) is fetched from the server API. No database copy
+        needed — eliminates WAL sync issues entirely.
+        """
         from pathlib import Path
         from .network.client import ServerConnection
         from .network.segment_provider import RemoteSegmentProvider
         from .schedule.remote_provider import RemoteScheduleProvider
-        from . import db
 
         print("Initializing CableTV Simulator (Remote)...")
 
@@ -148,6 +150,13 @@ class CableTVSystem:
         seed = server_info["seed"]
         print(f"  Server seed: {seed}")
 
+        # Sync schedule params from server — epoch and slot_duration MUST
+        # match or slot calculations diverge (different content everywhere).
+        if "epoch" in server_info:
+            self.config.schedule.epoch = server_info["epoch"]
+        if "slot_duration" in server_info:
+            self.config.schedule.slot_duration = server_info["slot_duration"]
+
         # Step 3: Override channel config with server's channels
         from .config import ChannelConfig
         self.config.channels = [
@@ -170,7 +179,7 @@ class CableTVSystem:
             self.config.weather.enabled = server_info["weather"].get("enabled", False)
             self.config.weather.channel_number = server_info["weather"].get("channel_number", 26)
 
-        # Step 4: Validate content_root
+        # Step 4: Validate content_root (still needed for media files)
         content_root = Path(self.config.network.content_root)
         if not content_root.exists():
             print(f"Error: content_root not accessible: {content_root}")
@@ -178,34 +187,30 @@ class CableTVSystem:
             return False
         print(f"  Content root: {content_root}")
 
-        # Step 5: Copy DB locally (SQLite doesn't work over network shares)
-        remote_db = content_root / "cabletv.db"
-        if not remote_db.exists():
-            print(f"Error: Database not found on share: {remote_db}")
-            return False
-        local_db = Path(tempfile.gettempdir()) / "cabletv_remote.db"
-        shutil.copy2(str(remote_db), str(local_db))
-        db.set_remote_db_path(local_db)
-        print(f"  Database: copied from server ({local_db})")
-
-        # Do NOT call init_database() — no migrations on server's DB
         # Ensure local directories exist for bumper background etc.
         ensure_directories()
 
-        # Step 6: Measure clock offset for sync
+        # Step 5: Measure clock offset for sync
         clock_offset = self._server_connection.measure_clock_offset()
         if abs(clock_offset) > 0.1:
             print(f"  Clock offset: {clock_offset:+.3f}s (adjusting)")
         else:
             print(f"  Clock offset: {clock_offset:+.3f}s (in sync)")
 
-        # Step 7: Create remote schedule provider (local engine with server's seed)
+        # Step 6: Create remote schedule provider (local engine with server's seed)
         self.schedule = RemoteScheduleProvider(
             self.config,
             self._server_connection.server_url,
             seed,
             clock_offset=clock_offset,
         )
+
+        # Step 7: Load all schedule data from server API
+        # This pre-populates all caches (content pools, break points,
+        # commercials, positions) so the engine never touches a database.
+        if not self.schedule.load_server_data():
+            print("Error: Could not load schedule data from server.")
+            return False
         print("  Schedule engine ready (remote, local computation)")
 
         # Step 8: Create playback engine with HTTP streaming

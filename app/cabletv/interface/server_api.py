@@ -97,6 +97,50 @@ def server_positions():
     return jsonify({"positions": positions})
 
 
+@server_bp.route("/api/server/schedule-data")
+def schedule_data():
+    """Return all data a remote client needs to compute schedules.
+
+    Replaces the old approach of copying cabletv.db (which had WAL
+    sync issues). One API call gives the remote everything it needs
+    to pre-populate its ScheduleEngine caches — no DB required.
+    """
+    if not _server_manager or not _config:
+        return jsonify({"error": "Server not initialized"}), 500
+
+    engine = _server_manager.engine
+
+    # Channel pools (content per channel, already filtered by tags/types)
+    channel_pools = {}
+    all_content_ids = set()
+    for ch in _config.channels:
+        pool = engine.get_channel_pool(ch)
+        channel_pools[str(ch.number)] = pool
+        for item in pool:
+            all_content_ids.add(item["id"])
+
+    # Break points for every content item in any pool
+    break_points = {}
+    for cid in all_content_ids:
+        bps = engine._get_content_break_points(cid)
+        if bps:
+            break_points[str(cid)] = bps
+
+    # Commercial pool
+    from ..schedule.commercials import get_commercial_pool
+    commercials = get_commercial_pool()
+
+    # Positions
+    positions = _server_manager.get_all_positions()
+
+    return jsonify({
+        "channel_pools": channel_pools,
+        "break_points": break_points,
+        "commercials": commercials,
+        "positions": positions,
+    })
+
+
 @server_bp.route("/api/server/time")
 def server_time():
     """Return server's current time for clock offset calculation."""

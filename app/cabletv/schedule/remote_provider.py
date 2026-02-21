@@ -3,6 +3,9 @@
 Overrides position loading (from server API) and position advancing
 (local cache + fire-and-forget to server). All schedule computation
 runs locally for zero-latency channel switching.
+
+All schedule data (content pools, break points, commercials, positions)
+is loaded from the server API at startup — no local database needed.
 """
 
 import requests
@@ -17,8 +20,8 @@ class RemoteScheduleProvider(ScheduleEngine):
     """ScheduleEngine subclass for remote mode.
 
     Uses the server's seed so schedule computations produce identical
-    results. Positions are loaded from the server API and advances
-    are sent back to the server (with local fallback).
+    results. All data is loaded from the server API at startup via
+    load_server_data() — the remote never touches a database.
     """
 
     def __init__(self, config: Config, server_url: str, seed: int,
@@ -30,6 +33,62 @@ class RemoteScheduleProvider(ScheduleEngine):
         self._clock_offset = timedelta(seconds=clock_offset)
         self._session = requests.Session()
         self._session.timeout = 5
+
+    def load_server_data(self) -> bool:
+        """Fetch all schedule data from the server and pre-populate caches.
+
+        This replaces the old approach of copying cabletv.db. One API
+        call gives us everything needed to compute schedules locally:
+        channel pools, break points, commercials, and positions.
+
+        Returns:
+            True if data loaded successfully
+        """
+        try:
+            resp = self._session.get(
+                f"{self._server_url}/api/server/schedule-data",
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except (requests.RequestException, ValueError) as e:
+            print(f"  Error: Could not load schedule data from server: {e}")
+            return False
+
+        # Pre-populate channel pools (content per channel)
+        channel_pools = data.get("channel_pools", {})
+        for ch_str, pool in channel_pools.items():
+            self._channel_pools[int(ch_str)] = pool
+
+        # Pre-populate break points
+        break_points = data.get("break_points", {})
+        for cid_str, bps in break_points.items():
+            self._break_point_cache[int(cid_str)] = bps
+
+        # Pre-populate positions
+        positions = data.get("positions", {})
+        for key_str, pos in positions.items():
+            parts = key_str.split(":", 1)
+            if len(parts) == 2:
+                try:
+                    ch = int(parts[0])
+                    gk = parts[1]
+                    self._positions[(ch, gk)] = pos
+                except ValueError:
+                    pass
+        self._positions_loaded = True
+
+        # Pre-populate commercial cache
+        commercials = data.get("commercials", [])
+        from .commercials import set_commercial_pool
+        set_commercial_pool(commercials)
+
+        pool_count = sum(len(p) for p in channel_pools.values())
+        bp_count = sum(len(b) for b in break_points.values())
+        print(f"  Schedule data: {pool_count} content items, "
+              f"{bp_count} break points, {len(commercials)} commercials, "
+              f"{len(positions)} positions")
+        return True
 
     def what_is_on(self, channel_number: int,
                    when: Optional[datetime] = None) -> Optional[NowPlaying]:
@@ -74,16 +133,14 @@ class RemoteScheduleProvider(ScheduleEngine):
         return super().get_guide_data(start_time, hours, channels)
 
     def _load_positions(self) -> None:
-        """Load positions from server API instead of local DB."""
+        """Positions are pre-loaded by load_server_data(). No-op."""
         if self._positions_loaded:
             return
-
+        # Fallback: load from server API if load_server_data wasn't called
         try:
             resp = self._session.get(f"{self._server_url}/api/server/positions")
             resp.raise_for_status()
             data = resp.json().get("positions", {})
-
-            # Parse "channel:group_key" -> (channel_number, group_key)
             for key_str, pos in data.items():
                 parts = key_str.split(":", 1)
                 if len(parts) == 2:
@@ -93,16 +150,10 @@ class RemoteScheduleProvider(ScheduleEngine):
                         self._positions[(ch, gk)] = pos
                     except ValueError:
                         pass
-
             self._positions_loaded = True
         except (requests.RequestException, ValueError) as e:
             print(f"  Warning: Could not load positions from server: {e}")
-            # Fall back to loading from DB on the network share
-            try:
-                super()._load_positions()
-            except Exception as e2:
-                print(f"  Warning: DB fallback also failed: {e2}")
-                self._positions_loaded = True  # Don't retry every call
+            self._positions_loaded = True
 
     def advance_position(self, channel_number: int, group_key: str,
                          num_items: int, preserve_block_start: Optional[int] = None,
