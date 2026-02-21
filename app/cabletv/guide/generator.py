@@ -346,10 +346,6 @@ class GuideGenerator:
             else:
                 regular_channels.append(ch.number)
 
-        # Refresh the guide's schedule engine so it picks up any
-        # position advances and doesn't reuse stale block cache entries.
-        self.schedule.refresh()
-
         # Get full schedule data for regular channels
         if regular_channels:
             schedule_data = self.schedule.get_guide_data(
