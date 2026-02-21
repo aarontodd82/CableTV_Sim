@@ -7,9 +7,14 @@
 local label = mp.get_script_name() .. "-cropdetect"
 local detect_timer = nil
 
-local DETECT_SECONDS = 0.15
+local DETECT_SECONDS = 0.3
 local MIN_CROP_PX = 14
 local TARGET_RATIO = 4 / 3
+-- Black threshold for bar detection. Video uses TV range where
+-- black = luminance 16. limit=24 catches bars (16) with margin
+-- for compression noise. Dark-content false positives are handled
+-- by the sanity checks below, not by this threshold.
+local DETECT_LIMIT = 24
 
 local function remove_filter()
     mp.command(string.format("no-osd vf remove @%s", label))
@@ -33,6 +38,17 @@ local function on_detect_complete()
     local vw = mp.get_property_number("width")
     local vh = mp.get_property_number("height")
     if not vw or not vh then return end
+
+    -- Sanity check: reject if detected area is implausibly small.
+    -- Width should be near full-frame (content is 4:3-normalized, bars
+    -- are horizontal only). Height can be shorter for wide movies but
+    -- not less than 30% (even ultra-wide 2.67:1 is ~50% height).
+    if w < vw * 0.75 or h < vh * 0.3 then
+        mp.msg.info(string.format(
+            "Crop rejected (area too small): %dx%d in %dx%d frame",
+            w, h, vw, vh))
+        return
+    end
 
     -- If content is taller than 4:3, trim height so width fills
     local ratio = w / h
@@ -64,8 +80,16 @@ local function on_file_loaded()
 
     pcall(mp.set_property, "video-crop", "")
 
+    -- Skip detection for static images (bumper backgrounds, etc.)
+    -- They are generated at exact target resolution and have no bars.
+    local path = mp.get_property("path", "")
+    if path:match("%.png$") or path:match("%.jpg$") or path:match("%.bmp$") then
+        return
+    end
+
     local cmd = string.format(
-        "no-osd vf pre @%s:cropdetect=limit=24/255:round=2:reset=0", label)
+        "no-osd vf pre @%s:cropdetect=limit=%d/255:round=2:reset=0",
+        label, DETECT_LIMIT)
 
     local ok, err = pcall(mp.command, cmd)
     if not ok then return end
