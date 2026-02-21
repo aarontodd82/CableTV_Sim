@@ -91,9 +91,8 @@ class CableTVSystem:
         # Create guide generator if enabled
         # The guide shares the playback ScheduleEngine so it sees the exact
         # same block cache and positions — guaranteeing the guide grid matches
-        # what actually plays.  get_guide_data() uses a snapshot/restore of
-        # the block cache internally so the guide's multi-channel future sweep
-        # doesn't contaminate the playback cache.
+        # what actually plays.  Since remote clients query the server API
+        # (same engine), everyone sees the same cache state.
         if self.config.guide.enabled:
             from .guide.generator import GuideGenerator
             self.guide_generator = GuideGenerator(self.config, self.schedule)

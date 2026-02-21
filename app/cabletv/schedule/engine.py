@@ -1174,12 +1174,6 @@ class ScheduleEngine:
         """
         Get TV guide data for multiple channels.
 
-        Uses a private copy of the block cache so the guide's multi-channel
-        sweep of future slots doesn't pollute the playback cache.  The guide
-        sees the same cache state and positions as playback (guaranteed match
-        for current slots), but any new entries created during the sweep are
-        discarded when the copy is dropped.
-
         Args:
             start_time: Start of guide window (default: now)
             hours: Hours to include in guide
@@ -1204,44 +1198,34 @@ class ScheduleEngine:
         first_slot = get_slot_number(start_time, self.epoch, self.slot_duration)
         walker_start = get_slot_start(first_slot, self.epoch, self.slot_duration)
 
-        # Snapshot the block cache so guide queries don't contaminate it.
-        # The guide sweeps 2+ hours of future slots across all channels,
-        # creating cache entries under different exclusion contexts.  Without
-        # isolation, playback would reuse those entries and diverge from
-        # what a clean query would produce.
-        saved_cache = self._block_cache
-        self._block_cache = dict(saved_cache)
-        try:
-            for channel_num in channels:
-                channel_config = self.config.channel_map.get(channel_num)
-                if not channel_config:
+        for channel_num in channels:
+            channel_config = self.config.channel_map.get(channel_num)
+            if not channel_config:
+                continue
+
+            entries = []
+            current_time = walker_start
+
+            while current_time < end_time:
+                # If the previous entry's slot block extends past this time,
+                # skip ahead.  Multi-slot content (movies) should display as
+                # one continuous block in the guide.  Without this, changing
+                # exclusion sets at slot boundaries can cause _find_block_start
+                # to return different content at each slot, fragmenting a
+                # 90-minute movie into 30-minute blocks.
+                if entries and entries[-1].slot_end_time > current_time:
+                    current_time += timedelta(minutes=self.slot_duration)
                     continue
 
-                entries = []
-                current_time = walker_start
+                now_playing = self.what_is_on(channel_num, current_time)
+                if now_playing:
+                    entry = now_playing.entry
+                    if entry.start_time < current_time:
+                        entry = replace(entry, start_time=current_time)
+                    entries.append(entry)
+                current_time += timedelta(minutes=self.slot_duration)
 
-                while current_time < end_time:
-                    # If the previous entry's slot block extends past this time,
-                    # skip ahead.  Multi-slot content (movies) should display as
-                    # one continuous block in the guide.  Without this, changing
-                    # exclusion sets at slot boundaries can cause _find_block_start
-                    # to return different content at each slot, fragmenting a
-                    # 90-minute movie into 30-minute blocks.
-                    if entries and entries[-1].slot_end_time > current_time:
-                        current_time += timedelta(minutes=self.slot_duration)
-                        continue
-
-                    now_playing = self.what_is_on(channel_num, current_time)
-                    if now_playing:
-                        entry = now_playing.entry
-                        if entry.start_time < current_time:
-                            entry = replace(entry, start_time=current_time)
-                        entries.append(entry)
-                    current_time += timedelta(minutes=self.slot_duration)
-
-                guide[channel_num] = entries
-        finally:
-            self._block_cache = saved_cache
+            guide[channel_num] = entries
 
         return guide
 
