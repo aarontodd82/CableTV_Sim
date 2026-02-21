@@ -1,7 +1,9 @@
 """Server API endpoints for remote clients."""
 
+import gzip
+import json
 from datetime import datetime
-from flask import Blueprint, jsonify, request, send_from_directory
+from flask import Blueprint, jsonify, request, send_from_directory, make_response
 from pathlib import Path
 from typing import Optional
 
@@ -110,35 +112,65 @@ def schedule_data():
 
     engine = _server_manager.engine
 
+    # Only send fields the remote engine actually needs
+    _POOL_FIELDS = (
+        "id", "title", "content_type", "series_name", "season",
+        "episode", "year", "duration_seconds", "normalized_path",
+        "original_path", "artist",
+    )
+
     # Channel pools (content per channel, already filtered by tags/types)
     channel_pools = {}
     all_content_ids = set()
     for ch in _config.channels:
         pool = engine.get_channel_pool(ch)
-        channel_pools[str(ch.number)] = pool
+        channel_pools[str(ch.number)] = [
+            {k: item[k] for k in _POOL_FIELDS if k in item}
+            for item in pool
+        ]
         for item in pool:
             all_content_ids.add(item["id"])
 
-    # Break points for every content item in any pool
+    # Break points — single bulk query instead of one per content item
     break_points = {}
-    for cid in all_content_ids:
-        bps = engine._get_content_break_points(cid)
-        if bps:
-            break_points[str(cid)] = bps
+    if all_content_ids:
+        from ..db import db_connection
+        with db_connection() as conn:
+            placeholders = ",".join("?" for _ in all_content_ids)
+            rows = conn.execute(
+                f"SELECT content_id, timestamp_seconds FROM break_points "
+                f"WHERE content_id IN ({placeholders}) "
+                f"ORDER BY content_id, timestamp_seconds",
+                list(all_content_ids),
+            ).fetchall()
+            for row in rows:
+                cid_str = str(row["content_id"])
+                break_points.setdefault(cid_str, []).append(row["timestamp_seconds"])
 
-    # Commercial pool
+    # Commercial pool (also strip to needed fields)
     from ..schedule.commercials import get_commercial_pool
-    commercials = get_commercial_pool()
+    _COMM_FIELDS = ("id", "title", "duration_seconds", "normalized_path",
+                    "original_path", "content_type")
+    commercials = [
+        {k: c[k] for k in _COMM_FIELDS if k in c}
+        for c in get_commercial_pool()
+    ]
 
     # Positions
     positions = _server_manager.get_all_positions()
 
-    return jsonify({
+    # Gzip the response — 30+ MB uncompressed, ~2 MB compressed
+    payload = json.dumps({
         "channel_pools": channel_pools,
         "break_points": break_points,
         "commercials": commercials,
         "positions": positions,
     })
+    compressed = gzip.compress(payload.encode(), compresslevel=1)
+    response = make_response(compressed)
+    response.headers["Content-Encoding"] = "gzip"
+    response.headers["Content-Type"] = "application/json"
+    return response
 
 
 @server_bp.route("/api/server/time")
