@@ -424,6 +424,10 @@ class PlaybackEngine:
 
         self._show_bumper_background()
 
+        # Need at least 2 seconds to be worth showing text
+        if seconds_remaining < 2:
+            return
+
         # Build mini-guide lines
         now_playing = self._current_playing
         guide_lines = []
@@ -431,29 +435,47 @@ class PlaybackEngine:
         if now_playing and now_playing.is_end_bumper:
             upcoming = self.schedule.get_upcoming(channel_number, count=3)
             if upcoming:
-                guide_lines.append(f"Now:  {upcoming[0][1]}")
+                guide_lines.append(("Now", upcoming[0][1]))
                 for start_time, title in upcoming[1:]:
                     time_str = start_time.strftime("%I:%M %p").lstrip("0")
-                    guide_lines.append(f"{time_str}  {title}")
+                    guide_lines.append((time_str, title))
         else:
             if now_playing:
-                guide_lines.append(f"Now:  {now_playing.entry.title}")
+                guide_lines.append(("Now", now_playing.entry.title))
             upcoming = self.schedule.get_upcoming(channel_number, count=2)
             for start_time, title in upcoming:
                 time_str = start_time.strftime("%I:%M %p").lstrip("0")
-                guide_lines.append(f"{time_str}  {title}")
+                guide_lines.append((time_str, title))
 
-        # Build centered ASS overlay — \\N for newlines, double for spacing
-        header = f"Ch {channel_number} - {name}"
-        bumper_ass = (
-            r"{\an5\pos(320,240)\fnVCR OSD Mono\fs24\bord2\shad1\1c&HFFFFFF&}"
-            + header + "\\N\\N"
-            + "\\N\\N".join(
-                r"{\fnVCR OSD Mono\fs20\bord2\shad1\1c&HFFFFFF&}" + line
-                for line in guide_lines
-            )
+        # Build centered ASS overlay using \an8 (top-center anchor)
+        # so Y positions are the top edge of each line — no overlap guessing
+        #
+        # Layout (480px canvas):
+        header = f"Ch {channel_number}  {name}"
+        parts = [
+            r"{\an8\pos(320,50)\fnVCR OSD Mono\fs36\bord0\shad0"
+            r"\1c&HFFFFFF&}" + header,
+        ]
+        # Decorative separator line
+        parts.append(
+            r"{\an8\pos(320,95)\fnVCR OSD Mono\fs16\bord0\shad0"
+            r"\1c&H888888&}" + "\u2500" * 28
         )
+        # Guide entries — label then title, 70px between entries for wrap room
+        y = 120
+        for label, title in guide_lines:
+            parts.append(
+                r"{\an8\pos(320," + str(y) + r")\fnVCR OSD Mono\fs28\bord0\shad0"
+                r"\1c&H00FFFF&}" + label
+            )
+            y += 35
+            parts.append(
+                r"{\an8\pos(320," + str(y) + r")\fnVCR OSD Mono\fs26\bord0\shad0"
+                r"\1c&HFFFFFF&}" + title
+            )
+            y += 70
 
+        bumper_ass = "\n".join(parts)
         self.mpv.show_osd_overlay(
             self._INFO_BUMPER_OVERLAY_ID, bumper_ass, res_x=640, res_y=480)
 
