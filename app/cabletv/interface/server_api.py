@@ -15,14 +15,19 @@ server_bp = Blueprint("server", __name__)
 _server_manager: Optional[ServerScheduleManager] = None
 _config: Optional[Config] = None
 _drive_root: Optional[Path] = None
+_guide_generator = None
+_weather_generator = None
 
 
-def register_server_api(app, config: Config, server_manager: ServerScheduleManager):
+def register_server_api(app, config: Config, server_manager: ServerScheduleManager,
+                        guide_generator=None, weather_generator=None):
     """Register server API blueprint with the Flask app."""
-    global _server_manager, _config, _drive_root
+    global _server_manager, _config, _drive_root, _guide_generator, _weather_generator
     _server_manager = server_manager
     _config = config
     _drive_root = get_drive_root()
+    _guide_generator = guide_generator
+    _weather_generator = weather_generator
     app.register_blueprint(server_bp)
 
 
@@ -233,6 +238,43 @@ def next_airing(channel_number):
 def server_time():
     """Return server's current time for clock offset calculation."""
     return jsonify({"time": datetime.now().timestamp()})
+
+
+def _segment_response(generator, segment_type: str):
+    """Build JSON response for a guide or weather segment endpoint."""
+    if not generator:
+        return jsonify({"error": f"{segment_type} not available"}), 404
+
+    segment_info = generator.get_current_segment()
+    if not segment_info:
+        return jsonify({"error": f"{segment_type} segment not ready"}), 404
+
+    file_path, generation_time, duration = segment_info
+
+    # Convert local path to relative URL under /media/
+    try:
+        rel = Path(file_path).relative_to(_drive_root)
+    except (ValueError, TypeError):
+        return jsonify({"error": "Cannot resolve segment path"}), 500
+
+    url_path = str(rel).replace("\\", "/")
+    return jsonify({
+        "generation_time": generation_time.isoformat(),
+        "duration": duration,
+        "url": f"/media/{url_path}",
+    })
+
+
+@server_bp.route("/api/server/guide-segment")
+def guide_segment():
+    """Return metadata and URL for the current guide segment."""
+    return _segment_response(_guide_generator, "Guide")
+
+
+@server_bp.route("/api/server/weather-segment")
+def weather_segment():
+    """Return metadata and URL for the current weather segment."""
+    return _segment_response(_weather_generator, "Weather")
 
 
 @server_bp.route("/media/<path:filepath>")

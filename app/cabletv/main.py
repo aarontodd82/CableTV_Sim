@@ -115,9 +115,8 @@ class CableTVSystem:
         The remote just asks "what's on channel X?" via API calls. No local
         schedule engine, no replicated state, no sync issues.
         """
-        from pathlib import Path
         from .network.client import ServerConnection
-        from .network.segment_provider import RemoteSegmentProvider
+        from .network.segment_provider import HttpSegmentProvider
         from .schedule.remote_provider import RemoteScheduleProvider
 
         print("Initializing CableTV Simulator (Remote)...")
@@ -168,25 +167,17 @@ class CableTVSystem:
             self.config.weather.enabled = server_info["weather"].get("enabled", False)
             self.config.weather.channel_number = server_info["weather"].get("channel_number", 26)
 
-        # Step 4: Validate content_root (still needed for media files)
-        content_root = Path(self.config.network.content_root)
-        if not content_root.exists():
-            print(f"Error: content_root not accessible: {content_root}")
-            print("  Ensure the network share is mounted/mapped.")
-            return False
-        print(f"  Content root: {content_root}")
-
         # Ensure local directories exist for bumper background etc.
         ensure_directories()
 
-        # Step 5: Measure clock offset for sync
+        # Step 4: Measure clock offset for sync
         clock_offset = self._server_connection.measure_clock_offset()
         if abs(clock_offset) > 0.1:
             print(f"  Clock offset: {clock_offset:+.3f}s (adjusting)")
         else:
             print(f"  Clock offset: {clock_offset:+.3f}s (in sync)")
 
-        # Step 6: Create remote schedule provider (thin API client)
+        # Step 5: Create remote schedule provider (thin API client)
         # No local engine — all schedule queries go to the server.
         self.schedule = RemoteScheduleProvider(
             self._server_connection.server_url,
@@ -196,32 +187,27 @@ class CableTVSystem:
         )
         print("  Schedule provider ready (server API)")
 
-        # Step 7: Create playback engine with HTTP streaming
-        media_url = f"{self._server_connection.server_url}/media"
+        # Step 6: Create playback engine with HTTP streaming
+        server_url = self._server_connection.server_url
+        media_url = f"{server_url}/media"
         self.playback = PlaybackEngine(
-            self.config, self.schedule, content_root=content_root,
+            self.config, self.schedule,
             media_base_url=media_url, clock_offset=clock_offset,
         )
         print(f"  Playback engine ready (streaming via {media_url})")
 
-        # Step 8: Set up guide/weather segment providers from network share
+        # Step 7: Set up guide/weather segment providers via HTTP API
+        # No network share needed — segments stream from the server's
+        # /media/ endpoint, metadata comes from /api/server/*-segment.
         if self.config.guide.enabled:
-            guide_dir = content_root / "guide"
-            if guide_dir.exists():
-                guide_provider = RemoteSegmentProvider(guide_dir, prefix="segment_")
-                self.playback.set_guide_generator(guide_provider)
-                print("  Guide: reading from network share")
-            else:
-                print("  Guide: directory not found on share, skipping")
+            guide_provider = HttpSegmentProvider(server_url, "guide")
+            self.playback.set_guide_generator(guide_provider)
+            print("  Guide: streaming from server")
 
         if self.config.weather.enabled:
-            weather_dir = content_root / "weather"
-            if weather_dir.exists():
-                weather_provider = RemoteSegmentProvider(weather_dir, prefix="weather_")
-                self.playback.set_weather_generator(weather_provider)
-                print("  Weather: reading from network share")
-            else:
-                print("  Weather: directory not found on share, skipping")
+            weather_provider = HttpSegmentProvider(server_url, "weather")
+            self.playback.set_weather_generator(weather_provider)
+            print("  Weather: streaming from server")
 
         return True
 
@@ -267,6 +253,8 @@ class CableTVSystem:
         # Register server API blueprint if in server mode
         server_manager = self._server_manager
         config = self.config
+        guide_gen = self.guide_generator
+        weather_gen = self.weather_generator
 
         def run_web():
             try:
@@ -275,7 +263,8 @@ class CableTVSystem:
 
                 if server_manager:
                     from .interface.server_api import register_server_api
-                    register_server_api(app, config, server_manager)
+                    register_server_api(app, config, server_manager,
+                                        guide_gen, weather_gen)
                     print("  Server API endpoints registered")
 
                 app.run(

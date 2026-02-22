@@ -44,9 +44,9 @@ ROW_ALT_1 = (0, 25, 90)
 ROW_ALT_2 = (0, 18, 65)
 
 # Layout
-BRAND_BAR_HEIGHT = 28
-TICKER_HEIGHT = 32
-PAGE_HEIGHT = 420  # 480 - 28 - 32
+BRAND_BAR_HEIGHT = 32
+TICKER_HEIGHT = 36
+PAGE_HEIGHT = 412  # 480 - 32 - 36
 
 # Number of pages in the cycle
 NUM_PAGES = 6
@@ -86,18 +86,18 @@ class WeatherRenderer:
         self.height = height
 
         # Fonts — VCR OSD Mono for authentic retro look
-        self._font_temp_large = _load_vcr_font(48)
-        self._font_header = _load_vcr_font(18)
-        self._font_subheader = _load_vcr_font(15)
-        self._font_data = _load_vcr_font(14)
-        self._font_data_bold = _load_vcr_font(14)
-        self._font_small = _load_vcr_font(12)
-        self._font_small_bold = _load_vcr_font(12)
-        self._font_brand = _load_vcr_font(14)
-        self._font_ticker = _load_vcr_font(18)
-        self._font_day = _load_vcr_font(14)
-        self._font_hourly = _load_vcr_font(13)
-        self._font_hourly_bold = _load_vcr_font(13)
+        self._font_temp_large = _load_vcr_font(56)
+        self._font_header = _load_vcr_font(22)
+        self._font_subheader = _load_vcr_font(18)
+        self._font_data = _load_vcr_font(17)
+        self._font_data_bold = _load_vcr_font(17)
+        self._font_small = _load_vcr_font(15)
+        self._font_small_bold = _load_vcr_font(15)
+        self._font_brand = _load_vcr_font(16)
+        self._font_ticker = _load_vcr_font(22)
+        self._font_day = _load_vcr_font(17)
+        self._font_hourly = _load_vcr_font(16)
+        self._font_hourly_bold = _load_vcr_font(16)
 
     def render_frame(
         self,
@@ -167,7 +167,7 @@ class WeatherRenderer:
         draw.rectangle([0, 0, self.width, BRAND_BAR_HEIGHT], fill=BRAND_BG)
 
         # "THE WEATHER CHANNEL" on the left
-        draw.text((10, 6), "THE WEATHER CHANNEL", fill=HEADER_YELLOW,
+        draw.text((10, 7), "THE WEATHER CHANNEL", fill=HEADER_YELLOW,
                   font=self._font_brand)
 
         # Location centered between logo and clock gap
@@ -176,11 +176,11 @@ class WeatherRenderer:
         text_w = bbox[2] - bbox[0]
         # Position: right-aligned but before the clock gap
         loc_x = self.width - self.CLOCK_GAP_WIDTH - text_w - 10
-        draw.text((loc_x, 6), location, fill=TEXT_WHITE, font=self._font_brand)
+        draw.text((loc_x, 7), location, fill=TEXT_WHITE, font=self._font_brand)
 
         # Thin separator before clock area
         sep_x = self.width - self.CLOCK_GAP_WIDTH
-        draw.line([(sep_x, 4), (sep_x, BRAND_BAR_HEIGHT - 4)], fill=ACCENT_BAR)
+        draw.line([(sep_x, 5), (sep_x, BRAND_BAR_HEIGHT - 5)], fill=ACCENT_BAR)
 
         # Accent line at bottom of brand bar
         draw.line([(0, BRAND_BAR_HEIGHT - 1), (self.width, BRAND_BAR_HEIGHT - 1)],
@@ -197,7 +197,7 @@ class WeatherRenderer:
                   font=self._font_header)
 
         # Accent bar under header
-        draw.line([(20, y_base + 24), (self.width - 20, y_base + 24)], fill=ACCENT_BAR)
+        draw.line([(20, y_base + 28), (self.width - 20, y_base + 28)], fill=ACCENT_BAR)
 
         # Large temperature (left side)
         temp_str = f"{c.temperature:.0f}\u00b0F"
@@ -215,10 +215,10 @@ class WeatherRenderer:
         draw.text((275, y_base + 55), desc, fill=TEXT_WHITE, font=self._font_data_bold)
 
         # Data grid (two columns)
-        grid_y = y_base + 120
+        grid_y = y_base + 130
         left_x = 40
         right_x = 340
-        row_h = 32
+        row_h = 36
 
         # Left column
         wind_dir = get_wind_direction_str(c.wind_direction)
@@ -238,12 +238,12 @@ class WeatherRenderer:
         for i, (label, value) in enumerate(data_left):
             y = grid_y + i * row_h
             draw.text((left_x, y), label, fill=TEXT_CYAN, font=self._font_data)
-            draw.text((left_x + 120, y), value, fill=TEXT_WHITE, font=self._font_data_bold)
+            draw.text((left_x + 140, y), value, fill=TEXT_WHITE, font=self._font_data_bold)
 
         for i, (label, value) in enumerate(data_right):
             y = grid_y + i * row_h
             draw.text((right_x, y), label, fill=TEXT_CYAN, font=self._font_data)
-            draw.text((right_x + 120, y), value, fill=TEXT_WHITE, font=self._font_data_bold)
+            draw.text((right_x + 140, y), value, fill=TEXT_WHITE, font=self._font_data_bold)
 
     def _draw_todays_forecast(self, img: Image.Image, weather: WeatherData) -> None:
         """Page 2: Today's Forecast — three sections: today, tonight, tomorrow."""
@@ -252,7 +252,7 @@ class WeatherRenderer:
 
         draw.text((20, y_base), "TODAY'S FORECAST", fill=HEADER_YELLOW,
                   font=self._font_header)
-        draw.line([(20, y_base + 24), (self.width - 20, y_base + 24)], fill=ACCENT_BAR)
+        draw.line([(20, y_base + 28), (self.width - 20, y_base + 28)], fill=ACCENT_BAR)
 
         if not weather.daily:
             draw.text((20, y_base + 50), "NO FORECAST DATA AVAILABLE",
@@ -263,7 +263,7 @@ class WeatherRenderer:
         c = weather.current
 
         # --- TODAY section ---
-        section_y = y_base + 34
+        section_y = y_base + 38
         draw.text((30, section_y), "TODAY", fill=HEADER_YELLOW, font=self._font_subheader)
 
         icon = draw_weather_icon(today.weather_code, size=48, night=False)
@@ -296,11 +296,11 @@ class WeatherRenderer:
                   fill=TEXT_WHITE, font=self._font_data_bold)
 
         # --- Divider ---
-        div_y = section_y + 78
+        div_y = section_y + 82
         draw.line([(30, div_y), (self.width - 30, div_y)], fill=ACCENT_BAR)
 
         # --- TONIGHT section ---
-        tonight_y = div_y + 10
+        tonight_y = div_y + 8
         draw.text((30, tonight_y), "TONIGHT", fill=HEADER_YELLOW, font=self._font_subheader)
 
         night_code = today.weather_code
@@ -332,13 +332,13 @@ class WeatherRenderer:
                       fill=TEXT_WHITE, font=self._font_data_bold)
 
         # --- Divider ---
-        div2_y = tonight_y + 78
+        div2_y = tonight_y + 82
         draw.line([(30, div2_y), (self.width - 30, div2_y)], fill=ACCENT_BAR)
 
         # --- TOMORROW section ---
         if len(weather.daily) > 1:
             tmrw = weather.daily[1]
-            tmrw_y = div2_y + 10
+            tmrw_y = div2_y + 8
             draw.text((30, tmrw_y), "TOMORROW", fill=HEADER_YELLOW, font=self._font_subheader)
 
             tmrw_icon = draw_weather_icon(tmrw.weather_code, size=48, night=False)
@@ -364,7 +364,7 @@ class WeatherRenderer:
 
         draw.text((20, y_base), "EXTENDED FORECAST", fill=HEADER_YELLOW,
                   font=self._font_header)
-        draw.line([(20, y_base + 24), (self.width - 20, y_base + 24)], fill=ACCENT_BAR)
+        draw.line([(20, y_base + 28), (self.width - 20, y_base + 28)], fill=ACCENT_BAR)
 
         days = weather.daily[:5]
         if not days:
@@ -472,15 +472,15 @@ class WeatherRenderer:
         y_base = BRAND_BAR_HEIGHT + 8
 
         draw.text((20, y_base), "ALMANAC", fill=HEADER_YELLOW, font=self._font_header)
-        draw.line([(20, y_base + 24), (self.width - 20, y_base + 24)], fill=ACCENT_BAR)
+        draw.line([(20, y_base + 28), (self.width - 20, y_base + 28)], fill=ACCENT_BAR)
 
         # --- Sun section (left column) ---
         sun_y = y_base + 38
         draw.text((40, sun_y), "SUN", fill=HEADER_YELLOW, font=self._font_subheader)
 
-        row_h = 26
+        row_h = 30
         label_x = 40
-        val_x = 170
+        val_x = 180
 
         if weather.daily:
             today = weather.daily[0]
@@ -515,7 +515,7 @@ class WeatherRenderer:
                   font=self._font_subheader)
 
         snap_label_x = snap_x
-        snap_val_x = snap_x + 120
+        snap_val_x = snap_x + 130
 
         draw.text((snap_label_x, sun_y + 24), "TEMP", fill=TEXT_CYAN, font=self._font_data)
         draw.text((snap_val_x, sun_y + 24), f"{c.temperature:.0f}\u00b0F",
@@ -535,7 +535,7 @@ class WeatherRenderer:
                       fill=_temp_color(weather.daily[0].low), font=self._font_data_bold)
 
         # --- Divider ---
-        div_y = sun_y + 110
+        div_y = sun_y + 118
         draw.line([(20, div_y), (self.width - 20, div_y)], fill=ACCENT_BAR)
 
         # --- Moon phase section ---
@@ -594,7 +594,7 @@ class WeatherRenderer:
         # --- Additional weather details at bottom ---
         detail_y = div2_y + 10
         col1_x = 40
-        col1_v = 170
+        col1_v = 180
         col2_x = 340
         col2_v = 470
 
@@ -623,22 +623,22 @@ class WeatherRenderer:
 
         draw.text((20, y_base), "HOURLY FORECAST", fill=HEADER_YELLOW,
                   font=self._font_header)
-        draw.line([(20, y_base + 24), (self.width - 20, y_base + 24)], fill=ACCENT_BAR)
+        draw.line([(20, y_base + 28), (self.width - 20, y_base + 28)], fill=ACCENT_BAR)
 
         # Column headers
-        header_y = y_base + 32
+        header_y = y_base + 36
         draw.text((30, header_y), "TIME", fill=TEXT_CYAN, font=self._font_small_bold)
         draw.text((150, header_y), "TEMP", fill=TEXT_CYAN, font=self._font_small_bold)
         draw.text((280, header_y), "CONDITIONS", fill=TEXT_CYAN, font=self._font_small_bold)
         draw.text((500, header_y), "PRECIP", fill=TEXT_CYAN, font=self._font_small_bold)
 
-        hours = weather.hourly[:12]
+        hours = weather.hourly[:10]
         if not hours:
             draw.text((20, header_y + 30), "NO HOURLY DATA AVAILABLE",
                       fill=TEXT_WHITE, font=self._font_data)
             return
 
-        row_height = 28
+        row_height = 33
         for i, h in enumerate(hours):
             y = header_y + 22 + i * row_height
 
@@ -679,7 +679,7 @@ class WeatherRenderer:
 
         draw.text((20, y_base), "REGIONAL RADAR", fill=HEADER_YELLOW,
                   font=self._font_header)
-        draw.line([(20, y_base + 24), (self.width - 20, y_base + 24)], fill=ACCENT_BAR)
+        draw.line([(20, y_base + 28), (self.width - 20, y_base + 28)], fill=ACCENT_BAR)
 
         # Scale and center radar image in the page area
         page_area_h = PAGE_HEIGHT - 50  # Leave room for header
@@ -706,7 +706,7 @@ class WeatherRenderer:
 
         draw.text((20, y_base), "REGIONAL TEMPS", fill=HEADER_YELLOW,
                   font=self._font_header)
-        draw.line([(20, y_base + 24), (self.width - 20, y_base + 24)], fill=ACCENT_BAR)
+        draw.line([(20, y_base + 28), (self.width - 20, y_base + 28)], fill=ACCENT_BAR)
 
         section_y = y_base + 44
 
@@ -765,7 +765,7 @@ class WeatherRenderer:
 
         # Calculate text position with scroll offset
         x = -int(ticker_offset)
-        text_y = ticker_y + 7
+        text_y = ticker_y + 7  # Vertically center in ticker bar
 
         draw.text((x, text_y), full_text, fill=TICKER_TEXT, font=self._font_ticker)
 
