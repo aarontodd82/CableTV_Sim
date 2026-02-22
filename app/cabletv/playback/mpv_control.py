@@ -74,6 +74,7 @@ class MpvController:
             "--osd-level=1",
             "--osd-duration=2000",
             "--osd-font=VCR OSD Mono",
+            "--osd-font-size=38",
             "--af=loudnorm=I=-24:TP=-2:LRA=11",
             f"--script={autocrop_script}",
             f"--script={keybinds_script}",
@@ -97,8 +98,8 @@ class MpvController:
             cmd.append("--autofit-smaller=640x480")
 
         # OSD base margin — keep text away from edges
-        osd_x = 20
-        osd_y = 15
+        osd_x = 40
+        osd_y = 30
 
         # Overscan compensation — shrink video and OSD to stay visible on CRT
         overscan = self.config.playback.overscan

@@ -267,7 +267,7 @@ class PlaybackEngine:
             if now_playing and now_playing.is_commercial:
                 # Commercials: only show OSD on user-initiated channel changes
                 if user_initiated:
-                    self._show_channel_osd(channel_number)
+                    self._show_channel_osd(channel_number, now_playing)
             elif now_playing and now_playing.entry.content_type == "music":
                 # Music videos: show artist/title/year instead of channel OSD
                 self._show_music_osd(now_playing)
@@ -341,7 +341,8 @@ class PlaybackEngine:
             message = str(channel_number)
 
         # Add clean program title (strip year from movies, S##E## from shows)
-        if now_playing and not now_playing.is_commercial:
+        # entry always refers to the main program, even during commercials
+        if now_playing:
             title = now_playing.entry.title
             # "The Shining (1980)" → "The Shining"
             title = re.sub(r"\s*\(\d{4}\)$", "", title)
@@ -550,7 +551,7 @@ class PlaybackEngine:
             timer.start()
 
     def show_info_overlay(self) -> bool:
-        """Show the 'next airing' lower-third on demand (triggered by remote).
+        """Show channel OSD + 'next airing' lower-third on demand.
 
         Returns True if the overlay was shown, False if nothing to show.
         """
@@ -558,13 +559,16 @@ class PlaybackEngine:
             now_playing = self._current_playing
             channel = self._current_channel
 
-        if (not now_playing
-                or now_playing.is_commercial
-                or not now_playing.entry.series_name):
+        if not now_playing or not channel:
             return False
 
-        # Show for 5 seconds then auto-remove
-        self._show_next_episode_bumper(now_playing, duration=5.0)
+        # Always show the channel/program OSD (entry is the main program even during commercials)
+        self._show_channel_osd(channel, now_playing)
+
+        # Show next-airing bumper for series content (not during commercials)
+        if not now_playing.is_commercial and now_playing.entry.series_name:
+            self._show_next_episode_bumper(now_playing, duration=5.0)
+
         return True
 
     def _remove_next_ep_overlay(self, now_playing: NowPlaying) -> None:
