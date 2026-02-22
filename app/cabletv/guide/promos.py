@@ -102,8 +102,8 @@ def select_promo_content(
     """
     Select upcoming content items to feature as promo clips.
 
-    Picks random channels at random future times (2-8 hours ahead)
-    to get a diverse set of real upcoming content with minimal queries.
+    Picks random channels at random times within the next 2 hours
+    to feature content that's on now or coming up soon.
 
     Args:
         schedule_engine: The schedule engine for looking up what's on
@@ -139,7 +139,7 @@ def select_promo_content(
             break
 
         ch_num = rng.choice(regular_channels)
-        hours_ahead = rng.uniform(2, 8)
+        hours_ahead = rng.uniform(0, 2)
         future_time = now + timedelta(hours=hours_ahead)
 
         np = schedule_engine.what_is_on(ch_num, future_time)
