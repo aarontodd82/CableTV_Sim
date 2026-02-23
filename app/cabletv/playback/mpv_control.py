@@ -171,7 +171,7 @@ class MpvController:
         """Connect via Unix domain socket."""
         try:
             self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            self._socket.settimeout(5.0)
+            self._socket.settimeout(1.0)
             self._socket.connect(self._ipc_address)
             return True
         except (socket.error, ConnectionRefusedError, FileNotFoundError):
@@ -329,12 +329,16 @@ class MpvController:
         if response is None:
             return False
 
-        # Wait for file to load (poll at 50ms intervals)
-        for _ in range(40):  # Up to 2 seconds
+        # Wait for file to load (poll at 50ms intervals, max 3s wall time).
+        # Deadline-based so a slow IPC response can't balloon this to minutes.
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
             time.sleep(0.05)
             pos = self._get_property("time-pos")
             if pos is not None:
                 break
+            if not self.is_connected:
+                break  # IPC lost — stop polling, loadfile already sent
 
         # Ensure playback is not paused — keep-open=yes leaves mpv paused
         # when a file ends, and loadfile may inherit that paused state
