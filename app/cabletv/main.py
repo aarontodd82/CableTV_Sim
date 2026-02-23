@@ -30,6 +30,7 @@ class CableTVSystem:
         self._server_manager = None  # ServerScheduleManager (server mode only)
         self._advertiser = None  # mDNS advertiser (server mode only)
         self._server_connection = None  # ServerConnection (remote mode only)
+        self._keyboard_listener = None  # Linux evdev keyboard (DRM mode)
 
     def initialize(self) -> bool:
         """
@@ -306,6 +307,9 @@ class CableTVSystem:
             except Exception:
                 pass
 
+        if self._keyboard_listener:
+            self._keyboard_listener.stop()
+
         if self.guide_generator:
             self.guide_generator.stop()
 
@@ -368,6 +372,19 @@ class CableTVSystem:
                     print("  Install with: pip install zeroconf")
                 except Exception as e:
                     print(f"  Warning: mDNS advertisement failed: {e}")
+
+            # Start Linux keyboard listener (DRM mode needs direct input)
+            if sys.platform != "win32" and not headless:
+                try:
+                    from .playback.linux_input import LinuxKeyboardListener
+                    self._keyboard_listener = LinuxKeyboardListener(
+                        api_port=self.config.web.port)
+                    self._keyboard_listener.start()
+                except ImportError:
+                    print("  Warning: evdev not installed, no keyboard input")
+                    print("  Install with: pip install evdev")
+                except Exception as e:
+                    print(f"  Warning: keyboard listener failed: {e}")
 
             # Start guide generator
             if self.guide_generator:
