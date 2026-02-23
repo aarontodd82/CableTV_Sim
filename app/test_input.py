@@ -1,11 +1,21 @@
+import select
 import evdev
 
+devices = []
 for p in evdev.list_devices():
     dev = evdev.InputDevice(p)
-    caps = dev.capabilities()
-    key_caps = caps.get(evdev.ecodes.EV_KEY, [])
-    has_a = evdev.ecodes.KEY_A in key_caps
-    has_up = evdev.ecodes.KEY_UP in key_caps
-    has_0 = evdev.ecodes.KEY_0 in key_caps
+    devices.append(dev)
     print(dev.path, dev.name)
-    print("  KEY_A:", has_a, " KEY_UP:", has_up, " KEY_0:", has_0, " total keys:", len(key_caps))
+
+print("\nListening on ALL devices. Press keys on Pi keyboard...")
+print("Will show which device produces events. Ctrl+C to stop.\n")
+
+dev_map = {dev.fd: dev for dev in devices}
+
+while True:
+    r, _, _ = select.select(devices, [], [], 1.0)
+    for dev in r:
+        for event in dev.read():
+            if event.type == evdev.ecodes.EV_KEY and event.value == 1:
+                name = evdev.ecodes.KEY.get(event.code, event.code)
+                print(dev.path, dev.name, "->", name)
