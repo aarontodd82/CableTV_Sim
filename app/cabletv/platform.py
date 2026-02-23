@@ -67,16 +67,11 @@ def get_drive_root() -> Path:
 def get_mpv_ipc_address() -> str:
     """
     Get mpv IPC address.
-    Windows: named pipe, Linux/Mac: TCP socket.
+    Windows: named pipe, Linux/Mac: Unix domain socket.
     """
     if sys.platform == "win32":
         return r"\\.\pipe\cabletv-mpv"
-    return "tcp://127.0.0.1:9876"
-
-
-def get_mpv_ipc_connect() -> tuple[str, int]:
-    """Get host and port for connecting to mpv IPC (TCP only, used on Linux/Mac)."""
-    return ("127.0.0.1", 9876)
+    return "/tmp/cabletv-mpv.sock"
 
 
 def get_ffmpeg_path() -> str:

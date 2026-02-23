@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional, Any
 
 from ..config import Config
-from ..platform import get_mpv_path, get_mpv_ipc_address, get_mpv_ipc_connect, configure_display
+from ..platform import get_mpv_path, get_mpv_ipc_address, configure_display
 
 
 class MpvController:
@@ -24,8 +24,7 @@ class MpvController:
         self.config = config
         self._ipc_address = get_mpv_ipc_address()
         self._use_pipe = sys.platform == "win32"
-        if not self._use_pipe:
-            self.host, self.port = get_mpv_ipc_connect()
+        self._use_unix_socket = sys.platform != "win32"
         self._process: Optional[subprocess.Popen] = None
         self._socket: Optional[socket.socket] = None
         self._pipe = None  # Windows named pipe file handle
@@ -119,6 +118,12 @@ class MpvController:
         if display_config.get("hwdec"):
             cmd.append(f"--hwdec={display_config['hwdec']}")
 
+        # Clean up stale Unix socket file from previous run
+        if self._use_unix_socket:
+            sock_path = Path(self._ipc_address)
+            if sock_path.exists():
+                sock_path.unlink()
+
         try:
             self._process = subprocess.Popen(
                 cmd,
@@ -149,16 +154,16 @@ class MpvController:
         """Connect to mpv IPC."""
         if self._use_pipe:
             return self._connect_pipe()
-        return self._connect_tcp()
+        return self._connect_unix()
 
-    def _connect_tcp(self) -> bool:
-        """Connect via TCP socket."""
+    def _connect_unix(self) -> bool:
+        """Connect via Unix domain socket."""
         try:
-            self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self._socket.settimeout(5.0)
-            self._socket.connect((self.host, self.port))
+            self._socket.connect(self._ipc_address)
             return True
-        except (socket.error, ConnectionRefusedError):
+        except (socket.error, ConnectionRefusedError, FileNotFoundError):
             self._socket = None
             return False
 
