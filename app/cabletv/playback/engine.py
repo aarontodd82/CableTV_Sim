@@ -53,6 +53,8 @@ class PlaybackEngine:
         # Track which content has been "seen" per channel (content_id already advanced)
         self._seen_content: dict[int, int] = {}  # channel -> content_id
         self._bumper_bg_path: Optional[Path] = None
+        self._eof_transition_pending = False  # Prevents double-transition (event + timer race)
+        self._fullscreen = True  # Stored for mpv restart
 
     def _now(self) -> datetime:
         """Get current time adjusted for clock offset (remote sync)."""
@@ -106,9 +108,21 @@ class PlaybackEngine:
         Returns:
             True if started successfully
         """
+        self._fullscreen = fullscreen
+
         if not self.mpv.start(fullscreen=fullscreen):
             print("Failed to start mpv")
             return False
+
+        # Start event listener (second IPC connection for eof/error events)
+        if self.mpv.start_event_listener():
+            self.mpv.observe_property("eof-reached", self._on_eof_reached)
+            self.mpv.on_event("end-file", self._on_end_file)
+        else:
+            print("Event listener unavailable — timer-only transitions")
+
+        # Start watchdog (periodic health check)
+        self.mpv.start_watchdog(interval=5.0, callback=self._on_watchdog_alert)
 
         return True
 
@@ -134,6 +148,13 @@ class PlaybackEngine:
         Returns:
             True if successful
         """
+        # Reset eof transition flag so the new segment can fire events cleanly
+        with self._lock:
+            self._eof_transition_pending = False
+
+        # Reset watchdog stall tracking (intentional position change)
+        self.mpv.reset_watchdog()
+
         # Validate channel exists
         if channel_number not in self.config.channel_map:
             print(f"Channel {channel_number} not found")
@@ -995,6 +1016,124 @@ class PlaybackEngine:
             self.tune_to(channel, user_initiated=False)
         except Exception as e:
             print(f"Error during content transition: {e}")
+
+    # ── Event-driven transition handlers ────────────────────────
+
+    def _on_eof_reached(self, name: str, value) -> None:
+        """Called by event listener when eof-reached property changes.
+
+        When mpv reaches the end= position with keep-open=yes, eof-reached
+        flips to True. This fires immediately — more responsive than the
+        backup timer. Cancel the timer and trigger the next tune_to().
+        """
+        if not value:
+            return  # Only act on True (eof reached), ignore False (new file loaded)
+
+        channel = None
+        with self._lock:
+            if self._eof_transition_pending:
+                return  # Another transition already in flight
+            self._eof_transition_pending = True
+            channel = self._current_channel
+            # Cancel the backup timer — eof event won
+            self._cancel_all_timers()
+
+        if not channel:
+            return
+
+        try:
+            self.tune_to(channel, user_initiated=False)
+        except Exception as e:
+            print(f"Error during eof-driven transition: {e}")
+
+    def _on_end_file(self, data: dict) -> None:
+        """Called by event listener on end-file events.
+
+        Catches file load errors (HTTP errors, missing files, decode failures).
+        On error, schedule an immediate retry.
+        """
+        reason = data.get("reason", "")
+        # "eof" is normal (segment boundary reached) — handled by eof-reached
+        # "stop" is normal (we loaded a new file)
+        # "error" means something went wrong
+        if reason != "error":
+            return
+
+        file_error = data.get("file_error", "unknown")
+        print(f"Event listener: end-file error ({file_error}), retrying in 1s")
+
+        channel = None
+        with self._lock:
+            channel = self._current_channel
+            # Cancel existing timers — we'll schedule our own retry
+            self._cancel_all_timers()
+
+        if channel:
+            # Short delay before retry (give network/disk a moment)
+            timer = threading.Timer(1.0, self._retry_tune, args=[channel])
+            timer.daemon = True
+            timer.start()
+            with self._lock:
+                self._timer = timer
+
+    def _retry_tune(self, channel: int) -> None:
+        """Retry tuning to a channel after an error."""
+        with self._lock:
+            if self._current_channel != channel:
+                return  # User changed channel, don't retry
+        try:
+            self.tune_to(channel, user_initiated=False)
+        except Exception as e:
+            print(f"Error during retry tune: {e}")
+
+    def _on_watchdog_alert(self, reason: str) -> None:
+        """Called by watchdog thread on health check failures."""
+        if reason == "process_dead":
+            print("Watchdog: restarting mpv...")
+            self._restart_mpv()
+        elif reason == "playback_stalled":
+            channel = None
+            with self._lock:
+                channel = self._current_channel
+            if channel:
+                print(f"Watchdog: retuning channel {channel} (stall recovery)")
+                try:
+                    self.tune_to(channel, user_initiated=False)
+                except Exception as e:
+                    print(f"Error during stall recovery: {e}")
+
+    def _restart_mpv(self) -> None:
+        """Restart mpv after a crash, re-register events, and retune."""
+        channel = None
+        with self._lock:
+            channel = self._current_channel
+            self._cancel_all_timers()
+
+        # Shutdown the dead process and connections
+        self.mpv.shutdown()
+
+        # Restart mpv
+        if not self.mpv.start(fullscreen=self._fullscreen):
+            print("Failed to restart mpv — retrying in 5s")
+            timer = threading.Timer(5.0, self._restart_mpv)
+            timer.daemon = True
+            timer.start()
+            return
+
+        # Re-register event listener
+        if self.mpv.start_event_listener():
+            self.mpv.observe_property("eof-reached", self._on_eof_reached)
+            self.mpv.on_event("end-file", self._on_end_file)
+
+        # Restart watchdog
+        self.mpv.start_watchdog(interval=5.0, callback=self._on_watchdog_alert)
+
+        # Retune to current channel
+        if channel:
+            try:
+                self.tune_to(channel, user_initiated=False)
+            except Exception as e:
+                print(f"Error retuning after restart: {e}")
 
     def channel_up(self) -> bool:
         """Switch to next channel."""

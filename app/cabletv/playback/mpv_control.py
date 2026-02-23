@@ -8,7 +8,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional, Any
+from typing import Optional, Any, Callable
 
 from ..config import Config
 from ..platform import get_mpv_path, get_mpv_ipc_address, configure_display
@@ -31,6 +31,23 @@ class MpvController:
         self._pipe = None  # Windows named pipe file handle
         self._request_id = 0
         self._ipc_lock = threading.Lock()  # Serialize all IPC access
+
+        # Event listener (second IPC connection for async event reading)
+        self._event_socket: Optional[socket.socket] = None
+        self._event_pipe = None
+        self._event_thread: Optional[threading.Thread] = None
+        self._event_stop = threading.Event()
+        self._event_callbacks: dict[str, list[Callable]] = {}
+        self._property_callbacks: dict[str, list[Callable]] = {}
+        self._next_observe_id = 1
+        self._observe_id_to_name: dict[int, str] = {}  # observe_id → property name
+
+        # Watchdog (periodic health check)
+        self._watchdog_thread: Optional[threading.Thread] = None
+        self._watchdog_stop = threading.Event()
+        self._watchdog_callback: Optional[Callable] = None
+        self._watchdog_last_pos: Optional[float] = None
+        self._watchdog_stall_count = 0
 
     @property
     def is_running(self) -> bool:
@@ -483,8 +500,318 @@ class MpvController:
         current = self._get_property("fullscreen")
         return self._set_property("fullscreen", not current)
 
+    # ── Event Listener ─────────────────────────────────────────────
+
+    def start_event_listener(self) -> bool:
+        """Open a second IPC connection and start background event reader.
+
+        Returns True if the event connection was established. On failure
+        (e.g. platform doesn't support multiple pipe clients), returns
+        False and the engine falls back to timer-only transitions.
+        """
+        if self._event_thread and self._event_thread.is_alive():
+            return True  # Already running
+
+        self._event_stop.clear()
+
+        # Open a second connection to the same IPC address
+        if self._use_pipe:
+            try:
+                self._event_pipe = open(self._ipc_address, "r+b", buffering=0)
+            except OSError as e:
+                print(f"Event listener: pipe open failed ({e}), timer-only mode")
+                return False
+        else:
+            try:
+                self._event_socket = socket.socket(
+                    socket.AF_UNIX, socket.SOCK_STREAM)
+                self._event_socket.settimeout(1.0)
+                self._event_socket.connect(self._ipc_address)
+            except (socket.error, ConnectionRefusedError, FileNotFoundError) as e:
+                print(f"Event listener: socket connect failed ({e}), timer-only mode")
+                self._event_socket = None
+                return False
+
+        self._event_thread = threading.Thread(
+            target=self._event_reader_loop, daemon=True,
+            name="mpv-event-reader")
+        self._event_thread.start()
+        return True
+
+    def on_event(self, name: str, callback: Callable) -> None:
+        """Register a callback for an mpv event (e.g. 'end-file')."""
+        self._event_callbacks.setdefault(name, []).append(callback)
+
+    def observe_property(self, name: str, callback: Callable) -> None:
+        """Register a callback for property changes and send observe_property.
+
+        The callback receives (property_name, value).
+        """
+        self._property_callbacks.setdefault(name, []).append(callback)
+
+        observe_id = self._next_observe_id
+        self._next_observe_id += 1
+        self._observe_id_to_name[observe_id] = name
+
+        self._send_event_command(
+            {"command": ["observe_property", observe_id, name]})
+
+    def _send_event_command(self, command_dict: dict) -> None:
+        """Fire-and-forget write on the event connection."""
+        try:
+            data = (json.dumps(command_dict) + "\n").encode("utf-8")
+            if self._use_pipe and self._event_pipe:
+                self._event_pipe.write(data)
+                self._event_pipe.flush()
+            elif self._event_socket:
+                self._event_socket.sendall(data)
+        except (OSError, socket.error) as e:
+            print(f"Event listener: send failed ({e})")
+
+    def _event_reader_loop(self) -> None:
+        """Background thread: read JSON lines from event connection, dispatch."""
+        buf = b""
+        while not self._event_stop.is_set():
+            try:
+                chunk = self._event_read_chunk()
+                if chunk is None:
+                    # Connection lost — attempt reconnect after a short delay
+                    if self._event_stop.is_set():
+                        break
+                    time.sleep(1.0)
+                    if self._event_reconnect():
+                        buf = b""
+                        continue
+                    else:
+                        # Reconnect failed — keep trying
+                        continue
+                if not chunk:
+                    continue
+
+                buf += chunk
+                # Process complete lines
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    line_str = line.decode("utf-8", errors="replace").strip()
+                    if not line_str:
+                        continue
+                    try:
+                        data = json.loads(line_str)
+                    except json.JSONDecodeError:
+                        continue
+                    self._dispatch_event(data)
+
+            except Exception as e:
+                if not self._event_stop.is_set():
+                    print(f"Event reader error: {e}")
+                    time.sleep(0.5)
+
+    def _event_read_chunk(self) -> Optional[bytes]:
+        """Read bytes from the event connection. Returns None on connection loss."""
+        if self._use_pipe:
+            if not self._event_pipe:
+                return None
+            try:
+                b = self._event_pipe.read(1)
+                if not b:
+                    return b""
+                return b
+            except OSError:
+                self._event_pipe = None
+                return None
+        else:
+            if not self._event_socket:
+                return None
+            try:
+                data = self._event_socket.recv(4096)
+                if not data:
+                    self._event_socket = None
+                    return None
+                return data
+            except socket.timeout:
+                return b""
+            except socket.error:
+                self._event_socket = None
+                return None
+
+    def _event_reconnect(self) -> bool:
+        """Try to re-establish the event connection."""
+        if self._event_stop.is_set():
+            return False
+        if self._use_pipe:
+            try:
+                self._event_pipe = open(self._ipc_address, "r+b", buffering=0)
+            except OSError:
+                return False
+        else:
+            try:
+                self._event_socket = socket.socket(
+                    socket.AF_UNIX, socket.SOCK_STREAM)
+                self._event_socket.settimeout(1.0)
+                self._event_socket.connect(self._ipc_address)
+            except (socket.error, ConnectionRefusedError, FileNotFoundError):
+                self._event_socket = None
+                return False
+
+        # Re-register all property observers on the new connection
+        for observe_id, prop_name in self._observe_id_to_name.items():
+            self._send_event_command(
+                {"command": ["observe_property", observe_id, prop_name]})
+        print("Event listener: reconnected")
+        return True
+
+    def _dispatch_event(self, data: dict) -> None:
+        """Route a parsed JSON message to the appropriate callbacks."""
+        # Property change notification
+        if data.get("event") == "property-change":
+            prop_name = data.get("name", "")
+            value = data.get("data")
+            for cb in self._property_callbacks.get(prop_name, []):
+                try:
+                    cb(prop_name, value)
+                except Exception as e:
+                    print(f"Property callback error ({prop_name}): {e}")
+            return
+
+        # Regular event
+        event_name = data.get("event")
+        if event_name:
+            for cb in self._event_callbacks.get(event_name, []):
+                try:
+                    cb(data)
+                except Exception as e:
+                    print(f"Event callback error ({event_name}): {e}")
+
+    def _stop_event_listener(self) -> None:
+        """Stop the event reader thread and close the event connection."""
+        self._event_stop.set()
+
+        # Close event connection to unblock the reader
+        if self._event_pipe:
+            try:
+                self._event_pipe.close()
+            except Exception:
+                pass
+            self._event_pipe = None
+        if self._event_socket:
+            try:
+                self._event_socket.close()
+            except Exception:
+                pass
+            self._event_socket = None
+
+        if self._event_thread:
+            self._event_thread.join(timeout=3.0)
+            self._event_thread = None
+
+        # Clear registrations
+        self._event_callbacks.clear()
+        self._property_callbacks.clear()
+        self._observe_id_to_name.clear()
+        self._next_observe_id = 1
+
+    # ── Watchdog ─────────────────────────────────────────────────
+
+    def start_watchdog(self, interval: float,
+                       callback: Callable[[str], None]) -> None:
+        """Start a periodic health-check thread.
+
+        The callback is called with a reason string:
+        - "process_dead" — mpv process exited unexpectedly
+        - "playback_stalled" — time-pos hasn't progressed for 2+ checks
+
+        Args:
+            interval: Seconds between checks (e.g. 5.0)
+            callback: Called on the watchdog thread with the reason string
+        """
+        if self._watchdog_thread and self._watchdog_thread.is_alive():
+            return  # Already running
+
+        self._watchdog_stop.clear()
+        self._watchdog_callback = callback
+        self._watchdog_last_pos = None
+        self._watchdog_stall_count = 0
+
+        self._watchdog_thread = threading.Thread(
+            target=self._watchdog_loop, args=(interval,),
+            daemon=True, name="mpv-watchdog")
+        self._watchdog_thread.start()
+
+    def _watchdog_loop(self, interval: float) -> None:
+        """Periodic health check: process alive + playback progressing."""
+        while not self._watchdog_stop.wait(timeout=interval):
+            try:
+                # Check 1: process alive
+                if self._process and self._process.poll() is not None:
+                    print("Watchdog: mpv process dead")
+                    self._watchdog_last_pos = None
+                    self._watchdog_stall_count = 0
+                    if self._watchdog_callback:
+                        self._watchdog_callback("process_dead")
+                    continue
+
+                # Check 2: playback progressing
+                # Skip if no process or not connected (startup/shutdown)
+                if not self.is_running or not self.is_connected:
+                    self._watchdog_last_pos = None
+                    self._watchdog_stall_count = 0
+                    continue
+
+                pos = self._get_property("time-pos")
+                paused = self._get_property("pause")
+
+                if pos is None:
+                    # No position — mpv is idle or between files, not a stall
+                    self._watchdog_last_pos = None
+                    self._watchdog_stall_count = 0
+                    continue
+
+                if paused:
+                    # Paused is intentional (keep-open=yes at segment end)
+                    self._watchdog_last_pos = pos
+                    self._watchdog_stall_count = 0
+                    continue
+
+                if (self._watchdog_last_pos is not None
+                        and abs(pos - self._watchdog_last_pos) < 0.1):
+                    self._watchdog_stall_count += 1
+                    if self._watchdog_stall_count >= 2:
+                        print(f"Watchdog: playback stalled at {pos:.1f}s "
+                              f"({self._watchdog_stall_count} checks)")
+                        self._watchdog_stall_count = 0
+                        self._watchdog_last_pos = None
+                        if self._watchdog_callback:
+                            self._watchdog_callback("playback_stalled")
+                        continue
+                else:
+                    self._watchdog_stall_count = 0
+
+                self._watchdog_last_pos = pos
+
+            except Exception as e:
+                print(f"Watchdog error: {e}")
+
+    def reset_watchdog(self) -> None:
+        """Reset watchdog stall tracking (call on intentional position changes)."""
+        self._watchdog_last_pos = None
+        self._watchdog_stall_count = 0
+
+    def _stop_watchdog(self) -> None:
+        """Stop the watchdog thread."""
+        self._watchdog_stop.set()
+        if self._watchdog_thread:
+            self._watchdog_thread.join(timeout=3.0)
+            self._watchdog_thread = None
+        self._watchdog_callback = None
+
+    # ── Shutdown ─────────────────────────────────────────────────
+
     def shutdown(self) -> None:
         """Shutdown mpv completely."""
+        # Stop event listener and watchdog first
+        self._stop_event_listener()
+        self._stop_watchdog()
+
         try:
             self._send_command(["quit"], wait_response=False)
         except Exception:
