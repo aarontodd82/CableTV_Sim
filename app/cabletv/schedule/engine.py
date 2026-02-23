@@ -322,7 +322,6 @@ class NowPlaying:
     # Tuple of (group_key, group_size, block_start_slot) — avoids
     # the remote needing to call get_channel_groups() locally.
     advance_info: Optional[tuple] = None
-    server_time: Optional[float] = None  # Server's time.time() when position was computed
 
     @property
     def slot_remaining_seconds(self) -> float:

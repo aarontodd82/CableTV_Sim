@@ -166,5 +166,4 @@ def _deserialize_now_playing(data: dict) -> NowPlaying:
         is_end_bumper=data.get("is_end_bumper", False),
         pack_count=data.get("pack_count", 1),
         advance_info=advance_info,
-        server_time=data.get("server_time"),
     )
