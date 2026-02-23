@@ -49,6 +49,7 @@ class PlaybackEngine:
         self._weather_generator: Optional["WeatherGenerator"] = None
         self._weather_current_file: Optional[Path] = None
         self._weather_clock_timer: Optional[threading.Timer] = None
+        self._speed_timer: Optional[threading.Timer] = None
         # Track which content has been "seen" per channel (content_id already advanced)
         self._seen_content: dict[int, int] = {}  # channel -> content_id
         self._bumper_bg_path: Optional[Path] = None
@@ -114,7 +115,7 @@ class PlaybackEngine:
     def _cancel_all_timers(self) -> None:
         """Cancel all pending timers. Must be called with self._lock held."""
         for attr in ("_timer", "_music_end_timer", "_next_ep_timer",
-                      "_mid_ep_timer", "_weather_clock_timer"):
+                      "_mid_ep_timer", "_weather_clock_timer", "_speed_timer"):
             timer = getattr(self, attr, None)
             if timer:
                 timer.cancel()
@@ -138,10 +139,11 @@ class PlaybackEngine:
             print(f"Channel {channel_number} not found")
             return False
 
-        # Clear any persistent overlays from previous content
+        # Clear any persistent overlays and reset speed from previous content
         self.mpv.remove_osd_overlay(self._NEXT_EP_OVERLAY_ID)
         self.mpv.remove_osd_overlay(self._WEATHER_CLOCK_OVERLAY_ID)
         self.mpv.remove_osd_overlay(self._INFO_BUMPER_OVERLAY_ID)
+        self.mpv._set_property("speed", 1.0)
 
         # Check if this is the guide channel
         if channel_number == self.config.guide.channel_number and self.config.guide.enabled:
@@ -163,7 +165,9 @@ class PlaybackEngine:
         with self._lock:
             self._cancel_all_timers()
 
-            # Get what's playing on this channel
+            # Get what's playing on this channel — record the query time
+            # so we can compensate for elapsed time before playback starts
+            query_time = time.time()
             now_playing = self.schedule.what_is_on(channel_number)
 
             # Advance series position on first sight — if you see an episode
@@ -246,21 +250,47 @@ class PlaybackEngine:
 
         elif play_action == "play_file":
             self.mpv.set_volume(100)
+            # Adjust seek forward by time elapsed since the server computed
+            # it (API round-trip + advance call + setup).  This way the
+            # start= position is current when mpv opens the stream, and we
+            # don't need a second seek that triggers extra HTTP requests.
+            seek_position += time.time() - query_time
             success = self.mpv.play_file(str(file_path), seek_seconds=seek_position)
             if not success:
                 print(f"Failed to play {file_path}")
             else:
-                # Recalculate seek position now that playback has started —
-                # the original was computed before loading, which can take
-                # time on HTTP streams, putting us behind
+                # Sync correction: the file just loaded, so mpv is at
+                # roughly the start= position we requested.  Ask the
+                # server where we *should* be NOW and compare.  If we're
+                # behind, briefly speed up playback to catch up — this
+                # avoids the extra HTTP range requests that a seek would
+                # cause and gives deterministic convergence for all
+                # remotes watching the same channel.
                 fresh = self.schedule.what_is_on(channel_number)
                 if fresh:
                     if fresh.is_commercial and fresh.commercial:
-                        self.mpv.seek(fresh.commercial.seek_position)
+                        target = fresh.commercial.seek_position
                     elif not fresh.is_commercial:
-                        self.mpv.seek(fresh.seek_position)
-                    # Update state with fresh timing so transition timer
-                    # and OSD use accurate remaining-time values
+                        target = fresh.seek_position
+                    else:
+                        target = None
+
+                    current_pos = self.mpv.get_position()
+                    if target is not None and current_pos is not None:
+                        delta = target - current_pos
+                        if delta > 0.3:
+                            # Speed up to catch up over ~3 seconds
+                            # (audio-pitch-correction keeps audio natural)
+                            catchup_secs = max(2.0, delta * 2)
+                            speed = 1.0 + delta / catchup_secs
+                            self.mpv._set_property("speed", speed)
+                            self._speed_timer = threading.Timer(
+                                catchup_secs,
+                                self._finish_speed_catchup,
+                                args=[channel_number])
+                            self._speed_timer.daemon = True
+                            self._speed_timer.start()
+
                     now_playing = fresh
                     with self._lock:
                         self._current_playing = fresh
@@ -905,6 +935,46 @@ class PlaybackEngine:
             with self._lock:
                 if self._current_channel == weather_ch:
                     self._timer = threading.Timer(5.0, self._weather_poll)
+                    self._timer.daemon = True
+                    self._timer.start()
+
+    def _finish_speed_catchup(self, channel_number: int) -> None:
+        """Reset playback speed and fix the transition timer.
+
+        Called by the speed catch-up timer after the brief fast-forward
+        period.  Reads mpv's actual position to set an accurate
+        transition timer (the original one was based on pre-catchup
+        timing and would fire late).
+        """
+        with self._lock:
+            self._speed_timer = None
+            # Bail if user switched channels during catch-up
+            if self._current_channel != channel_number:
+                return
+
+        # IPC calls outside the lock (mpv has its own IPC lock)
+        self.mpv._set_property("speed", 1.0)
+        pos = self.mpv.get_position()
+
+        with self._lock:
+            if not self._current_playing or self._current_channel != channel_number:
+                return
+            # Cancel the stale transition timer
+            if self._timer:
+                self._timer.cancel()
+                self._timer = None
+
+            # Compute remaining time from mpv's actual position
+            if pos is not None:
+                np = self._current_playing
+                if np.is_commercial and np.commercial:
+                    end_pos = np.commercial.seek_position + np.commercial.remaining_seconds
+                else:
+                    end_pos = np.seek_position + np.remaining_seconds
+                remaining = end_pos - pos
+                if remaining > 0:
+                    self._timer = threading.Timer(
+                        remaining + 0.15, self._on_content_end)
                     self._timer.daemon = True
                     self._timer.start()
 
