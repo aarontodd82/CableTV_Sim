@@ -324,14 +324,6 @@ class PlaybackEngine:
                     retry_timer.daemon = True
                     retry_timer.start()
 
-                # Update timing on now_playing for downstream consumers
-                # (transition timers, bumper scheduling, OSD timers)
-                elapsed_adj = total_elapsed - (api_done - query_time)
-                now_playing.remaining_seconds = max(
-                    0.1, now_playing.remaining_seconds - elapsed_adj)
-                if now_playing.is_commercial and now_playing.commercial:
-                    now_playing.commercial.remaining_seconds = max(
-                        0.1, now_playing.commercial.remaining_seconds - elapsed_adj)
 
             if now_playing and now_playing.is_commercial:
                 # Commercials: only show OSD on user-initiated channel changes
