@@ -126,7 +126,6 @@ class MpvController:
                 if sock_path.exists():
                     sock_path.unlink()
             except PermissionError:
-                import os
                 os.system(f"sudo rm -f {self._ipc_address}")
             except Exception:
                 pass
