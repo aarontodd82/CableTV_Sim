@@ -1,34 +1,11 @@
 import evdev
 
-# Find actual keyboard (not mouse "keyboard")
-devices = [evdev.InputDevice(p) for p in evdev.list_devices()]
-kb = None
-for dev in devices:
-    if "Keyboard" in dev.name:
-        caps = dev.capabilities()
-        key_caps = caps.get(evdev.ecodes.EV_KEY, [])
-        if evdev.ecodes.KEY_A in key_caps:
-            kb = dev
-            break
-
-if not kb:
-    print("No keyboard found")
-else:
-    print("Found:", kb.path, kb.name)
-    print("Press keys (Ctrl+C to stop)...")
-    try:
-        kb.grab()
-        print("Grabbed device OK")
-    except Exception as e:
-        print("Grab failed:", e)
-    try:
-        for event in kb.read_loop():
-            if event.type == evdev.ecodes.EV_KEY and event.value == 1:
-                print("Key:", event.code, evdev.ecodes.KEY.get(event.code, "unknown"))
-    except KeyboardInterrupt:
-        print("Done")
-    finally:
-        try:
-            kb.ungrab()
-        except Exception:
-            pass
+for p in evdev.list_devices():
+    dev = evdev.InputDevice(p)
+    caps = dev.capabilities()
+    key_caps = caps.get(evdev.ecodes.EV_KEY, [])
+    has_a = evdev.ecodes.KEY_A in key_caps
+    has_up = evdev.ecodes.KEY_UP in key_caps
+    has_0 = evdev.ecodes.KEY_0 in key_caps
+    print(dev.path, dev.name)
+    print("  KEY_A:", has_a, " KEY_UP:", has_up, " KEY_0:", has_0, " total keys:", len(key_caps))
