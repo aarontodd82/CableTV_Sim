@@ -279,13 +279,22 @@ class PlaybackEngine:
                     if target is not None and current_pos is not None:
                         delta = target - current_pos
                         if delta > 0.3:
-                            # Speed up to catch up over ~3 seconds
-                            # (audio-pitch-correction keeps audio natural)
+                            # Behind — speed up to catch up
                             catchup_secs = max(2.0, delta * 2)
                             speed = 1.0 + delta / catchup_secs
                             self.mpv._set_property("speed", speed)
                             self._speed_timer = threading.Timer(
                                 catchup_secs,
+                                self._finish_speed_catchup,
+                                args=[channel_number])
+                            self._speed_timer.daemon = True
+                            self._speed_timer.start()
+                        elif delta < -0.3:
+                            # Ahead (keyframe landed past target) — pause
+                            # briefly so real-time catches up to our position
+                            self.mpv._set_property("pause", True)
+                            self._speed_timer = threading.Timer(
+                                abs(delta),
                                 self._finish_speed_catchup,
                                 args=[channel_number])
                             self._speed_timer.daemon = True
@@ -954,6 +963,7 @@ class PlaybackEngine:
 
         # IPC calls outside the lock (mpv has its own IPC lock)
         self.mpv._set_property("speed", 1.0)
+        self.mpv._set_property("pause", False)
         pos = self.mpv.get_position()
 
         with self._lock:
