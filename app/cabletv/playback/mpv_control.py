@@ -83,6 +83,9 @@ class MpvController:
             "--cache=yes",
             "--cache-secs=10",
             "--demuxer-readahead-secs=3",
+            # Exact seeking — prevents keyframe rounding so multiple
+            # remotes watching the same channel stay in tight sync
+            "--hr-seek=yes",
         ]
 
         # Add fullscreen or fixed window size
@@ -344,7 +347,7 @@ class MpvController:
 
     def seek(self, seconds: float, absolute: bool = True) -> bool:
         """
-        Seek to a position.
+        Seek to a position (exact, not keyframe-snapped).
 
         Args:
             seconds: Position in seconds
@@ -353,7 +356,7 @@ class MpvController:
         Returns:
             True if successful
         """
-        mode = "absolute" if absolute else "relative"
+        mode = "absolute+exact" if absolute else "relative+exact"
         response = self._send_command(["seek", str(seconds), mode])
         return response is not None
 
