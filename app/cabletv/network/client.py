@@ -78,10 +78,14 @@ class ServerConnection:
             print(f"  Error fetching server info: {e}")
             return None
 
-    def measure_clock_offset(self, samples: int = 5) -> float:
+    def measure_clock_offset(self, samples: int = 15) -> float:
         """Measure the clock offset between this machine and the server.
 
-        Uses multiple samples and takes the median to reduce noise.
+        Uses an NTP-inspired approach: take many samples and use the ones
+        with the lowest round-trip time. Low-RTT samples have the most
+        accurate offset estimates because the server's response timestamp
+        is closest to the true midpoint of the round trip.
+
         Positive offset means server clock is ahead of local clock.
 
         Returns:
@@ -90,8 +94,8 @@ class ServerConnection:
         if not self._server_url:
             return 0.0
 
-        offsets = []
-        for _ in range(samples):
+        results = []  # (rtt, offset) pairs
+        for i in range(samples):
             try:
                 t1 = time.time()
                 resp = self._session.get(
@@ -103,16 +107,29 @@ class ServerConnection:
                     # Server timestamp was captured mid-round-trip
                     estimated_server_now = server_time + rtt / 2
                     offset = estimated_server_now - t2
-                    offsets.append(offset)
+                    results.append((rtt, offset))
             except (requests.RequestException, ValueError, KeyError):
                 pass
+            # Small delay between samples to avoid network bursts
+            if i < samples - 1:
+                time.sleep(0.02)
 
-        if not offsets:
+        if not results:
             return 0.0
 
-        # Median is more robust than mean against outliers
-        offsets.sort()
-        return offsets[len(offsets) // 2]
+        # Sort by RTT — lowest RTT samples have the most accurate offsets
+        results.sort(key=lambda x: x[0])
+
+        # Average the offsets from the best 30% of samples (lowest RTT)
+        n_best = max(2, len(results) * 3 // 10)
+        best_offsets = [r[1] for r in results[:n_best]]
+        offset = sum(best_offsets) / len(best_offsets)
+
+        best_rtt_ms = results[0][0] * 1000
+        print(f"  Clock sync: {len(results)}/{samples} ok, "
+              f"best RTT={best_rtt_ms:.1f}ms, using top {n_best}")
+
+        return offset
 
     def get_positions(self) -> dict[str, int]:
         """Fetch all series positions from server.

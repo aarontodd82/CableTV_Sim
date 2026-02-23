@@ -1,5 +1,6 @@
 """Server API endpoints for remote clients."""
 
+import time as _time
 from datetime import datetime
 from flask import Blueprint, jsonify, request, send_from_directory
 from pathlib import Path
@@ -194,11 +195,18 @@ def what_is_on(channel_number):
     when_ts = request.args.get("when", type=float)
     when = datetime.fromtimestamp(when_ts) if when_ts else None
 
+    # Capture server time BEFORE the engine call — the engine immediately
+    # calls datetime.now(), so this timestamp matches when the seek position
+    # was computed.  Remote clients use this to calculate exact corrections
+    # after file load without a second API round-trip.
+    compute_time = _time.time()
     np = engine.what_is_on(channel_number, when)
     if not np:
         return jsonify(None), 404
 
-    return jsonify(_serialize_now_playing(np))
+    result = _serialize_now_playing(np)
+    result["server_time"] = compute_time
+    return jsonify(result)
 
 
 @server_bp.route("/api/server/upcoming/<int:channel_number>")
@@ -237,7 +245,7 @@ def next_airing(channel_number):
 @server_bp.route("/api/server/time")
 def server_time():
     """Return server's current time for clock offset calculation."""
-    return jsonify({"time": datetime.now().timestamp()})
+    return jsonify({"time": _time.time()})
 
 
 def _segment_response(generator, segment_type: str):
