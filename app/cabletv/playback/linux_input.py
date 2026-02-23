@@ -18,14 +18,19 @@ import requests
 def _find_keyboard() -> evdev.InputDevice | None:
     """Find the first keyboard device in /dev/input/."""
     devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
+
+    # First pass: look for devices with "Keyboard" in the name
     for dev in devices:
-        caps = dev.capabilities(verbose=True)
-        # Look for devices that have KEY events with letter keys
-        for (etype_name, _), keys in caps.items():
-            if etype_name == "EV_KEY":
-                key_names = [k[0] if isinstance(k, list) else k for _, k in keys]
-                if "KEY_A" in key_names or "KEY_Q" in key_names:
-                    return dev
+        if "Keyboard" in dev.name:
+            return dev
+
+    # Second pass: look for devices that have common keyboard key codes
+    for dev in devices:
+        caps = dev.capabilities()
+        key_caps = caps.get(evdev.ecodes.EV_KEY, [])
+        if evdev.ecodes.KEY_UP in key_caps and evdev.ecodes.KEY_0 in key_caps:
+            return dev
+
     return None
 
 
