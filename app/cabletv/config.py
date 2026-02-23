@@ -1,11 +1,34 @@
 """Configuration loader and management."""
 
+import os
 import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 from .platform import get_drive_root
+
+
+def _load_dotenv():
+    """Load .env file from project root if it exists."""
+    env_path = get_drive_root() / ".env"
+    if not env_path.exists():
+        return
+    with open(env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip()
+                # Don't override existing env vars
+                if key not in os.environ:
+                    os.environ[key] = value
+
+
+_load_dotenv()
 
 
 @dataclass
@@ -175,8 +198,8 @@ def load_config(config_path: Optional[Path] = None) -> Config:
     if "ingest" in data:
         ing = data["ingest"]
         config.ingest = IngestConfig(
-            tmdb_api_key=ing.get("tmdb_api_key", ""),
-            anthropic_api_key=ing.get("anthropic_api_key", ""),
+            tmdb_api_key=ing.get("tmdb_api_key", "") or os.environ.get("TMDB_API_KEY", ""),
+            anthropic_api_key=ing.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", ""),
             transcode_width=ing.get("transcode_width", 640),
             transcode_height=ing.get("transcode_height", 480),
             video_bitrate=ing.get("video_bitrate", "1500k"),

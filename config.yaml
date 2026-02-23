@@ -153,12 +153,11 @@ channels:
     content_types: ["movie"]
 
 ingest:
-  # TMDB API key - get one free at https://www.themoviedb.org/settings/api
-  tmdb_api_key: "5de25704c96ce85f5c47b46a4a37fdf6"
-  # Anthropic API key for AI-powered content identification
-  # Get one at https://console.anthropic.com/settings/keys
-  # Or set ANTHROPIC_API_KEY environment variable
-  anthropic_api_key: "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"
+  # API keys are loaded from .env file or environment variables
+  # TMDB: set TMDB_API_KEY in .env (get one at https://www.themoviedb.org/settings/api)
+  tmdb_api_key: ""
+  # Anthropic: set ANTHROPIC_API_KEY in .env (get one at https://console.anthropic.com/settings/keys)
+  anthropic_api_key: ""
   # Transcode output resolution (4:3 aspect ratio for CRT)
   transcode_width: 640
   transcode_height: 480
