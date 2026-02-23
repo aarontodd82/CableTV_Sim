@@ -129,9 +129,11 @@ class LinuxKeyboardListener:
         try:
             # Grab exclusive access so keys don't also go to the console
             device.grab()
-        except Exception:
-            pass  # Non-fatal if grab fails
+            print(f"  [kbd] Grabbed {device.path} OK")
+        except Exception as e:
+            print(f"  [kbd] Grab FAILED: {e}")
 
+        print(f"  [kbd] Entering read loop on {device.path}...")
         try:
             for event in device.read_loop():
                 if self._stop_event.is_set():
