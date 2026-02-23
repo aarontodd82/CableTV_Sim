@@ -67,8 +67,9 @@ class LinuxKeyboardListener:
         evdev.ecodes.KEY_8: "8", evdev.ecodes.KEY_9: "9",
     }
 
-    def __init__(self, api_port: int = 5000):
+    def __init__(self, api_port: int = 5000, mpv_controller=None):
         self._base_url = f"http://127.0.0.1:{api_port}"
+        self._mpv = mpv_controller
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._digit_buffer = ""
@@ -102,6 +103,14 @@ class LinuxKeyboardListener:
         except Exception:
             pass
 
+    def _show_osd(self, text: str, duration_ms: int = 1500) -> None:
+        """Show OSD message on mpv if available."""
+        if self._mpv:
+            try:
+                self._mpv.show_osd_message(text, duration_ms)
+            except Exception:
+                pass
+
     def _commit_channel(self) -> None:
         """Commit buffered digits as a channel number."""
         if self._digit_timer:
@@ -119,6 +128,7 @@ class LinuxKeyboardListener:
             self._digit_timer = None
 
         self._digit_buffer += digit
+        self._show_osd(f"Ch {self._digit_buffer}")
 
         # Two digits: commit immediately (max channel is 55)
         if len(self._digit_buffer) >= 2:

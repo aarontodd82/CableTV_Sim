@@ -377,8 +377,10 @@ class CableTVSystem:
             if sys.platform != "win32" and not headless:
                 try:
                     from .playback.linux_input import LinuxKeyboardListener
+                    mpv = self.playback.mpv if self.playback else None
                     self._keyboard_listener = LinuxKeyboardListener(
-                        api_port=self.config.web.port)
+                        api_port=self.config.web.port,
+                        mpv_controller=mpv)
                     self._keyboard_listener.start()
                 except ImportError:
                     pass
