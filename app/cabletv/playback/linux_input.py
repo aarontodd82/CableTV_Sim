@@ -16,15 +16,28 @@ import requests
 
 
 def _find_keyboard() -> evdev.InputDevice | None:
-    """Find the first keyboard device in /dev/input/."""
+    """Find the first keyboard device in /dev/input/.
+
+    Prioritizes actual keyboards over mouse/gamepad "keyboard" devices
+    by checking for letter key capabilities (KEY_A etc).
+    """
     devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
 
-    # First pass: look for devices with "Keyboard" in the name
+    # First pass: devices with "Keyboard" in name AND letter keys
+    # (filters out mouse "keyboard" devices that only have media keys)
+    for dev in devices:
+        if "Keyboard" in dev.name:
+            caps = dev.capabilities()
+            key_caps = caps.get(evdev.ecodes.EV_KEY, [])
+            if evdev.ecodes.KEY_A in key_caps:
+                return dev
+
+    # Second pass: any device with "Keyboard" in name
     for dev in devices:
         if "Keyboard" in dev.name:
             return dev
 
-    # Second pass: look for devices that have common keyboard key codes
+    # Third pass: any device with arrow keys and digit keys
     for dev in devices:
         caps = dev.capabilities()
         key_caps = caps.get(evdev.ecodes.EV_KEY, [])

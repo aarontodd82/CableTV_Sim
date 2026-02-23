@@ -1,12 +1,15 @@
 import evdev
 
-# Find keyboard
+# Find actual keyboard (not mouse "keyboard")
 devices = [evdev.InputDevice(p) for p in evdev.list_devices()]
 kb = None
 for dev in devices:
     if "Keyboard" in dev.name:
-        kb = dev
-        break
+        caps = dev.capabilities()
+        key_caps = caps.get(evdev.ecodes.EV_KEY, [])
+        if evdev.ecodes.KEY_A in key_caps:
+            kb = dev
+            break
 
 if not kb:
     print("No keyboard found")
