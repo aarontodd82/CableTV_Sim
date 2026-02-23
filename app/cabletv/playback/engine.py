@@ -278,6 +278,7 @@ class PlaybackEngine:
                     current_pos = self.mpv.get_position()
                     if target is not None and current_pos is not None:
                         delta = target - current_pos
+                        print(f"  Sync: target={target:.2f} pos={current_pos:.2f} delta={delta:+.2f}s")
                         if delta > 0.3:
                             # Behind — speed up to catch up
                             catchup_secs = max(2.0, delta * 2)
