@@ -131,28 +131,11 @@ class MpvController:
                 pass
 
         try:
-            # On Linux, start mpv in its own process group so we can
-            # make it the terminal foreground group (receives keyboard input)
-            popen_kwargs = {}
-            if sys.platform != "win32":
-                popen_kwargs["preexec_fn"] = os.setpgrp
-
             self._process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                **popen_kwargs,
             )
-
-            # On Linux DRM mode, make mpv the foreground process group
-            # so it receives keyboard input from the terminal
-            if sys.platform != "win32":
-                try:
-                    fd = os.open("/dev/tty", os.O_RDWR)
-                    os.tcsetpgrp(fd, self._process.pid)
-                    os.close(fd)
-                except Exception:
-                    pass
 
             # Wait for mpv to start and open IPC socket
             time.sleep(1.0)

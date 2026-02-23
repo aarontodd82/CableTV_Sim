@@ -16,26 +16,35 @@ import requests
 
 
 def _find_keyboard() -> evdev.InputDevice | None:
-    """Find the first keyboard device in /dev/input/.
+    """Find the keyboard device that actually produces key events.
 
-    Prioritizes actual keyboards over mouse/gamepad "keyboard" devices
-    by checking for letter key capabilities (KEY_A etc).
+    Some keyboards (e.g. Razer) split across multiple /dev/input/ devices.
+    The one named "Keyboard" may not be the one that produces actual key
+    events. We prefer non-"Keyboard" devices from known brands first,
+    then fall back to name-based matching.
     """
     devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
 
-    # First pass: devices with "Keyboard" in name AND letter keys,
-    # but NOT mouse devices (mice can expose a "Keyboard" sub-device)
+    # First pass: non-Mouse, non-"Keyboard" suffix devices with letter keys.
+    # Many USB keyboards expose the real key events on a device WITHOUT
+    # "Keyboard" in the name (e.g. "Razer Razer BlackWidow V3 Mini").
+    for dev in devices:
+        if "Mouse" in dev.name or "HDMI" in dev.name:
+            continue
+        if "Keyboard" in dev.name:
+            continue  # Skip the "Keyboard" sub-device for now
+        caps = dev.capabilities()
+        key_caps = caps.get(evdev.ecodes.EV_KEY, [])
+        if evdev.ecodes.KEY_A in key_caps and len(key_caps) > 50:
+            return dev
+
+    # Second pass: devices with "Keyboard" in name (excluding mice)
     for dev in devices:
         if "Keyboard" in dev.name and "Mouse" not in dev.name:
             caps = dev.capabilities()
             key_caps = caps.get(evdev.ecodes.EV_KEY, [])
             if evdev.ecodes.KEY_A in key_caps:
                 return dev
-
-    # Second pass: any device with "Keyboard" in name (excluding mice)
-    for dev in devices:
-        if "Keyboard" in dev.name and "Mouse" not in dev.name:
-            return dev
 
     # Third pass: any device with arrow keys and digit keys
     for dev in devices:
