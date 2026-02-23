@@ -49,7 +49,7 @@ class PlaybackEngine:
         self._weather_generator: Optional["WeatherGenerator"] = None
         self._weather_current_file: Optional[Path] = None
         self._weather_clock_timer: Optional[threading.Timer] = None
-        self._speed_timer: Optional[threading.Timer] = None
+        self._speed_timer: Optional[threading.Timer] = None  # unused, kept for _cancel_all_timers
         # Track which content has been "seen" per channel (content_id already advanced)
         self._seen_content: dict[int, int] = {}  # channel -> content_id
         self._bumper_bg_path: Optional[Path] = None
@@ -139,11 +139,10 @@ class PlaybackEngine:
             print(f"Channel {channel_number} not found")
             return False
 
-        # Clear any persistent overlays and reset speed from previous content
+        # Clear any persistent overlays from previous content
         self.mpv.remove_osd_overlay(self._NEXT_EP_OVERLAY_ID)
         self.mpv.remove_osd_overlay(self._WEATHER_CLOCK_OVERLAY_ID)
         self.mpv.remove_osd_overlay(self._INFO_BUMPER_OVERLAY_ID)
-        self.mpv._set_property("speed", 1.0)
 
         # Check if this is the guide channel
         if channel_number == self.config.guide.channel_number and self.config.guide.enabled:
@@ -165,13 +164,10 @@ class PlaybackEngine:
         with self._lock:
             self._cancel_all_timers()
 
-            # Get what's playing on this channel — bracket the API call
-            # with local timestamps so we know when the server computed
-            # seek_position (midpoint of the round-trip).
+            # Get what's playing on this channel — record query time so we
+            # can adjust seek_position for elapsed time before mpv opens.
             query_time = time.time()
             now_playing = self.schedule.what_is_on(channel_number)
-            api_done = time.time()
-            seek_birth_time = query_time + (api_done - query_time) / 2
 
             # Advance series position on first sight — if you see an episode
             # playing, it's consumed and the next selection will be the next episode.
@@ -244,6 +240,7 @@ class PlaybackEngine:
                 print(f"Error advancing series position: {e}")
 
         # Phase 2: Execute mpv commands (NO lock — IPC has its own lock)
+        target_now = None  # set by play_file sync; used for transition timer in Phase 3
         if play_action == "no_content":
             self._show_no_content_message(channel_number)
             return False
@@ -262,67 +259,18 @@ class PlaybackEngine:
             if not success:
                 print(f"Failed to play {file_path}")
             else:
-                # Birth-time sync correction: compute total elapsed time
-                # since the server computed seek_position.  This captures
-                # ALL delay sources in one number: API RTT, advance call,
-                # mpv HTTP open, moov read, range request, demuxer init,
-                # keyframe decode, cache fill, poll loop overhead.
-                # No second API call — avoids segment mismatch risk.
-                total_elapsed = time.time() - seek_birth_time
-
+                # Compute target_now for wall-clock transition timer (Phase 3).
+                # This is where real time says we are in the file, accounting
+                # for all delay (API, advance, mpv load).  The seek_position
+                # adjustment above gets mpv close; the transition timer uses
+                # target_now so it fires at the right wall-clock moment
+                # regardless of how long the file took to load.
+                total_elapsed = time.time() - query_time
                 if now_playing.is_commercial and now_playing.commercial:
                     base_seek = now_playing.commercial.seek_position
                 else:
                     base_seek = now_playing.seek_position
-
                 target_now = base_seek + total_elapsed
-                current_pos = self.mpv.get_position()
-
-                if current_pos is not None:
-                    delta = target_now - current_pos
-                    print(f"  Sync: target={target_now:.3f} pos={current_pos:.3f} "
-                          f"delta={delta:+.3f}s (elapsed={total_elapsed:.3f}s)")
-
-                    if abs(delta) > 5.0:
-                        # Way off — hard seek
-                        self.mpv.seek(target_now, absolute=True)
-                    elif abs(delta) > 0.05:
-                        # Speed correction: converge smoothly
-                        catchup_secs = max(2.0, abs(delta) / 0.15)
-                        speed = 1.0 + delta / catchup_secs
-                        speed = max(0.85, min(1.15, speed))
-                        self.mpv._set_property("speed", speed)
-                        self._speed_timer = threading.Timer(
-                            catchup_secs, self._finish_speed_catchup,
-                            args=[channel_number])
-                        self._speed_timer.daemon = True
-                        self._speed_timer.start()
-                    # else: within 50ms, no correction needed
-                else:
-                    # mpv still loading — retry correction shortly
-                    def _retry_sync():
-                        pos = self.mpv.get_position()
-                        if pos is not None:
-                            retry_elapsed = time.time() - seek_birth_time
-                            target = base_seek + retry_elapsed
-                            d = target - pos
-                            print(f"  Sync retry: target={target:.3f} pos={pos:.3f} "
-                                  f"delta={d:+.3f}s")
-                            if abs(d) > 5.0:
-                                self.mpv.seek(target, absolute=True)
-                            elif abs(d) > 0.05:
-                                secs = max(2.0, abs(d) / 0.15)
-                                spd = 1.0 + d / secs
-                                spd = max(0.85, min(1.15, spd))
-                                self.mpv._set_property("speed", spd)
-                                self._speed_timer = threading.Timer(
-                                    secs, self._finish_speed_catchup,
-                                    args=[channel_number])
-                                self._speed_timer.daemon = True
-                                self._speed_timer.start()
-                    retry_timer = threading.Timer(0.5, _retry_sync)
-                    retry_timer.daemon = True
-                    retry_timer.start()
 
 
             if now_playing and now_playing.is_commercial:
@@ -381,8 +329,31 @@ class PlaybackEngine:
                                 self._mid_ep_timer.start()
 
         # Phase 3: Schedule next transition timer (lock held)
+        # For play_file, compute from wall-clock position so the timer
+        # accounts for load delay (critical on slow hardware like Pi).
+        # target_now = "where real time says we should be in the file";
+        # end_pos - target_now = wall-clock seconds until segment ends.
         with self._lock:
-            self._schedule_next_content()
+            if target_now is not None and now_playing:
+                if now_playing.is_commercial and now_playing.commercial:
+                    end_pos = (now_playing.commercial.seek_position
+                               + now_playing.commercial.remaining_seconds)
+                else:
+                    end_pos = (now_playing.seek_position
+                               + now_playing.remaining_seconds)
+                remaining = end_pos - target_now
+                if remaining > 0:
+                    self._timer = threading.Timer(
+                        remaining + 0.15, self._on_content_end)
+                    self._timer.daemon = True
+                    self._timer.start()
+                else:
+                    # Already past segment end — transition immediately
+                    self._timer = threading.Timer(0.1, self._on_content_end)
+                    self._timer.daemon = True
+                    self._timer.start()
+            else:
+                self._schedule_next_content()
 
         # Phase 4: Fire callbacks (NO lock — avoids deadlock)
         if self._on_channel_change:
@@ -965,47 +936,6 @@ class PlaybackEngine:
             with self._lock:
                 if self._current_channel == weather_ch:
                     self._timer = threading.Timer(5.0, self._weather_poll)
-                    self._timer.daemon = True
-                    self._timer.start()
-
-    def _finish_speed_catchup(self, channel_number: int) -> None:
-        """Reset playback speed and fix the transition timer.
-
-        Called by the speed catch-up timer after the brief fast-forward
-        period.  Reads mpv's actual position to set an accurate
-        transition timer (the original one was based on pre-catchup
-        timing and would fire late).
-        """
-        with self._lock:
-            self._speed_timer = None
-            # Bail if user switched channels during catch-up
-            if self._current_channel != channel_number:
-                return
-
-        # IPC calls outside the lock (mpv has its own IPC lock)
-        self.mpv._set_property("speed", 1.0)
-        self.mpv._set_property("pause", False)
-        pos = self.mpv.get_position()
-
-        with self._lock:
-            if not self._current_playing or self._current_channel != channel_number:
-                return
-            # Cancel the stale transition timer
-            if self._timer:
-                self._timer.cancel()
-                self._timer = None
-
-            # Compute remaining time from mpv's actual position
-            if pos is not None:
-                np = self._current_playing
-                if np.is_commercial and np.commercial:
-                    end_pos = np.commercial.seek_position + np.commercial.remaining_seconds
-                else:
-                    end_pos = np.seek_position + np.remaining_seconds
-                remaining = end_pos - pos
-                if remaining > 0:
-                    self._timer = threading.Timer(
-                        remaining + 0.15, self._on_content_end)
                     self._timer.daemon = True
                     self._timer.start()
 
