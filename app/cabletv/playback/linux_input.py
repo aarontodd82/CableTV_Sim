@@ -9,7 +9,6 @@ Only imported/used on Linux — Windows uses mpv's built-in terminal input.
 """
 
 import threading
-import time
 
 import evdev
 import requests
@@ -20,8 +19,8 @@ def _find_keyboard() -> evdev.InputDevice | None:
 
     Some keyboards (e.g. Razer) split across multiple /dev/input/ devices.
     The one named "Keyboard" may not be the one that produces actual key
-    events. We prefer non-"Keyboard" devices from known brands first,
-    then fall back to name-based matching.
+    events. We check all devices with letter key capabilities, preferring
+    non-mouse devices that look like real keyboards.
     """
     devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
 
@@ -83,7 +82,7 @@ class LinuxKeyboardListener:
             print("  Warning: No keyboard found for direct input")
             return False
 
-        print(f"  Linux keyboard input: {device.name}")
+        print(f"  Linux keyboard input: {device.name} ({device.path})")
 
         self._thread = threading.Thread(
             target=self._listen, args=(device,), daemon=True)
@@ -99,10 +98,9 @@ class LinuxKeyboardListener:
     def _api_post(self, endpoint: str) -> None:
         """Fire-and-forget POST to Flask API."""
         try:
-            r = requests.post(self._base_url + endpoint, timeout=2)
-            print(f"  [kbd] {endpoint} -> {r.status_code}")
-        except Exception as e:
-            print(f"  [kbd] {endpoint} -> ERROR: {e}")
+            requests.post(self._base_url + endpoint, timeout=2)
+        except Exception:
+            pass
 
     def _commit_channel(self) -> None:
         """Commit buffered digits as a channel number."""
@@ -138,23 +136,16 @@ class LinuxKeyboardListener:
         try:
             # Grab exclusive access so keys don't also go to the console
             device.grab()
-            print(f"  [kbd] Grabbed {device.path} OK")
-        except Exception as e:
-            print(f"  [kbd] Grab FAILED: {e}")
+        except Exception:
+            pass  # Non-fatal if grab fails
 
-        print(f"  [kbd] Entering read loop on {device.path}...")
         try:
             for event in device.read_loop():
                 if self._stop_event.is_set():
                     break
 
                 # Only handle key-down events (value=1)
-                if event.type != evdev.ecodes.EV_KEY:
-                    continue
-                if event.value == 1:
-                    print(f"  [kbd] key down: {event.code}")
-
-                if event.value != 1:
+                if event.type != evdev.ecodes.EV_KEY or event.value != 1:
                     continue
 
                 code = event.code
