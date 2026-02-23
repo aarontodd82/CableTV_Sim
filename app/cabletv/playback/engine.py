@@ -165,10 +165,13 @@ class PlaybackEngine:
         with self._lock:
             self._cancel_all_timers()
 
-            # Get what's playing on this channel — record the query time
-            # so we can compensate for elapsed time before playback starts
+            # Get what's playing on this channel — bracket the API call
+            # with local timestamps so we know when the server computed
+            # seek_position (midpoint of the round-trip).
             query_time = time.time()
             now_playing = self.schedule.what_is_on(channel_number)
+            api_done = time.time()
+            seek_birth_time = query_time + (api_done - query_time) / 2
 
             # Advance series position on first sight — if you see an episode
             # playing, it's consumed and the next selection will be the next episode.
@@ -259,51 +262,76 @@ class PlaybackEngine:
             if not success:
                 print(f"Failed to play {file_path}")
             else:
-                # Sync correction: the file just loaded, so mpv is at
-                # roughly the start= position we requested.  Ask the
-                # server where we *should* be NOW and compare.  If we're
-                # behind, briefly speed up playback to catch up — this
-                # avoids the extra HTTP range requests that a seek would
-                # cause and gives deterministic convergence for all
-                # remotes watching the same channel.
-                fresh = self.schedule.what_is_on(channel_number)
-                if fresh:
-                    if fresh.is_commercial and fresh.commercial:
-                        target = fresh.commercial.seek_position
-                    elif not fresh.is_commercial:
-                        target = fresh.seek_position
-                    else:
-                        target = None
+                # Birth-time sync correction: compute total elapsed time
+                # since the server computed seek_position.  This captures
+                # ALL delay sources in one number: API RTT, advance call,
+                # mpv HTTP open, moov read, range request, demuxer init,
+                # keyframe decode, cache fill, poll loop overhead.
+                # No second API call — avoids segment mismatch risk.
+                total_elapsed = time.time() - seek_birth_time
 
-                    current_pos = self.mpv.get_position()
-                    if target is not None and current_pos is not None:
-                        delta = target - current_pos
-                        print(f"  Sync: target={target:.2f} pos={current_pos:.2f} delta={delta:+.2f}s")
-                        if delta > 0.3:
-                            # Behind — speed up to catch up
-                            catchup_secs = max(2.0, delta * 2)
-                            speed = 1.0 + delta / catchup_secs
-                            self.mpv._set_property("speed", speed)
-                            self._speed_timer = threading.Timer(
-                                catchup_secs,
-                                self._finish_speed_catchup,
-                                args=[channel_number])
-                            self._speed_timer.daemon = True
-                            self._speed_timer.start()
-                        elif delta < -0.3:
-                            # Ahead (keyframe landed past target) — pause
-                            # briefly so real-time catches up to our position
-                            self.mpv._set_property("pause", True)
-                            self._speed_timer = threading.Timer(
-                                abs(delta),
-                                self._finish_speed_catchup,
-                                args=[channel_number])
-                            self._speed_timer.daemon = True
-                            self._speed_timer.start()
+                if now_playing.is_commercial and now_playing.commercial:
+                    base_seek = now_playing.commercial.seek_position
+                else:
+                    base_seek = now_playing.seek_position
 
-                    now_playing = fresh
-                    with self._lock:
-                        self._current_playing = fresh
+                target_now = base_seek + total_elapsed
+                current_pos = self.mpv.get_position()
+
+                if current_pos is not None:
+                    delta = target_now - current_pos
+                    print(f"  Sync: target={target_now:.3f} pos={current_pos:.3f} "
+                          f"delta={delta:+.3f}s (elapsed={total_elapsed:.3f}s)")
+
+                    if abs(delta) > 5.0:
+                        # Way off — hard seek
+                        self.mpv.seek(target_now, absolute=True)
+                    elif abs(delta) > 0.05:
+                        # Speed correction: converge smoothly
+                        catchup_secs = max(2.0, abs(delta) / 0.15)
+                        speed = 1.0 + delta / catchup_secs
+                        speed = max(0.85, min(1.15, speed))
+                        self.mpv._set_property("speed", speed)
+                        self._speed_timer = threading.Timer(
+                            catchup_secs, self._finish_speed_catchup,
+                            args=[channel_number])
+                        self._speed_timer.daemon = True
+                        self._speed_timer.start()
+                    # else: within 50ms, no correction needed
+                else:
+                    # mpv still loading — retry correction shortly
+                    def _retry_sync():
+                        pos = self.mpv.get_position()
+                        if pos is not None:
+                            retry_elapsed = time.time() - seek_birth_time
+                            target = base_seek + retry_elapsed
+                            d = target - pos
+                            print(f"  Sync retry: target={target:.3f} pos={pos:.3f} "
+                                  f"delta={d:+.3f}s")
+                            if abs(d) > 5.0:
+                                self.mpv.seek(target, absolute=True)
+                            elif abs(d) > 0.05:
+                                secs = max(2.0, abs(d) / 0.15)
+                                spd = 1.0 + d / secs
+                                spd = max(0.85, min(1.15, spd))
+                                self.mpv._set_property("speed", spd)
+                                self._speed_timer = threading.Timer(
+                                    secs, self._finish_speed_catchup,
+                                    args=[channel_number])
+                                self._speed_timer.daemon = True
+                                self._speed_timer.start()
+                    retry_timer = threading.Timer(0.5, _retry_sync)
+                    retry_timer.daemon = True
+                    retry_timer.start()
+
+                # Update timing on now_playing for downstream consumers
+                # (transition timers, bumper scheduling, OSD timers)
+                elapsed_adj = total_elapsed - (api_done - query_time)
+                now_playing.remaining_seconds = max(
+                    0.1, now_playing.remaining_seconds - elapsed_adj)
+                if now_playing.is_commercial and now_playing.commercial:
+                    now_playing.commercial.remaining_seconds = max(
+                        0.1, now_playing.commercial.remaining_seconds - elapsed_adj)
 
             if now_playing and now_playing.is_commercial:
                 # Commercials: only show OSD on user-initiated channel changes
