@@ -119,6 +119,11 @@ class MpvController:
         if display_config.get("hwdec"):
             cmd.append(f"--hwdec={display_config['hwdec']}")
 
+        # DRM output resolution (Linux only, e.g. "1024x768")
+        resolution = self.config.playback.resolution
+        if resolution and display_config.get("video_output") == "drm":
+            cmd.append(f"--drm-mode={resolution}")
+
         # Clean up stale Unix socket file from previous run
         if self._use_unix_socket:
             sock_path = Path(self._ipc_address)

@@ -49,6 +49,7 @@ class PlaybackConfig:
     screen: int = -1  # Display index for fullscreen (-1 = default/primary)
     overscan: float = 0.0  # Overscan compensation as percentage (e.g. 5.0 = 5% margin on each edge)
     bumper_music: str = ""  # Path to background music file for info bumpers
+    resolution: str = ""  # DRM output resolution (e.g. "1024x768", "" = display default)
 
 
 @dataclass
@@ -195,6 +196,7 @@ def load_config(config_path: Optional[Path] = None) -> Config:
             screen=pb.get("screen", -1),
             overscan=pb.get("overscan", 0.0),
             bumper_music=pb.get("bumper_music", ""),
+            resolution=pb.get("resolution", ""),
         )
 
     # Parse web settings
