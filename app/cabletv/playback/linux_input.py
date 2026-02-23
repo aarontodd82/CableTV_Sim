@@ -90,9 +90,10 @@ class LinuxKeyboardListener:
     def _api_post(self, endpoint: str) -> None:
         """Fire-and-forget POST to Flask API."""
         try:
-            requests.post(self._base_url + endpoint, timeout=2)
-        except Exception:
-            pass
+            r = requests.post(self._base_url + endpoint, timeout=2)
+            print(f"  [kbd] {endpoint} -> {r.status_code}")
+        except Exception as e:
+            print(f"  [kbd] {endpoint} -> ERROR: {e}")
 
     def _commit_channel(self) -> None:
         """Commit buffered digits as a channel number."""
@@ -137,7 +138,12 @@ class LinuxKeyboardListener:
                     break
 
                 # Only handle key-down events (value=1)
-                if event.type != evdev.ecodes.EV_KEY or event.value != 1:
+                if event.type != evdev.ecodes.EV_KEY:
+                    continue
+                if event.value == 1:
+                    print(f"  [kbd] key down: {event.code}")
+
+                if event.value != 1:
                     continue
 
                 code = event.code
