@@ -256,12 +256,22 @@ class PlaybackEngine:
 
         elif play_action == "play_file":
             self.mpv.set_volume(100)
+            # Compute the exact file position where this segment ends.
+            # mpv's end= option stops playback precisely here.
+            if now_playing.is_commercial and now_playing.commercial:
+                end_pos = (now_playing.commercial.seek_position
+                           + now_playing.commercial.remaining_seconds)
+            else:
+                end_pos = (now_playing.seek_position
+                           + now_playing.remaining_seconds)
             # Adjust seek forward by time elapsed since the server computed
             # it (API round-trip + advance call + setup).  This way the
             # start= position is current when mpv opens the stream, and we
             # don't need a second seek that triggers extra HTTP requests.
             seek_position += time.time() - query_time
-            success = self.mpv.play_file(str(file_path), seek_seconds=seek_position)
+            success = self.mpv.play_file(
+                str(file_path), seek_seconds=seek_position,
+                end_seconds=end_pos)
             if not success:
                 print(f"Failed to play {file_path}")
             else:
@@ -339,14 +349,10 @@ class PlaybackEngine:
         # accounts for load delay (critical on slow hardware like Pi).
         # target_now = "where real time says we should be in the file";
         # end_pos - target_now = wall-clock seconds until segment ends.
+        # mpv's end= option is the primary segment boundary; this timer
+        # is a backup that also triggers the next tune_to call.
         with self._lock:
             if target_now is not None and now_playing:
-                if now_playing.is_commercial and now_playing.commercial:
-                    end_pos = (now_playing.commercial.seek_position
-                               + now_playing.commercial.remaining_seconds)
-                else:
-                    end_pos = (now_playing.seek_position
-                               + now_playing.remaining_seconds)
                 remaining = end_pos - target_now
                 if remaining > 0:
                     self._timer = threading.Timer(

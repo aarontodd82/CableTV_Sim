@@ -76,6 +76,10 @@ class MpvController:
             "--osd-font=VCR OSD Mono",
             "--osd-font-size=38",
             "--af=loudnorm=I=-24:TP=-2:LRA=11",
+            # Precise seeking — start= defaults to keyframe seek, which can
+            # land 0-5s before the target.  hr-seek=yes decodes from the prior
+            # keyframe to the exact frame, keeping remotes in sync.
+            "--hr-seek=yes",
             f"--script={autocrop_script}",
             f"--script={keybinds_script}",
             f"--script-opts=cabletv-port={self.config.web.port}",
@@ -301,6 +305,7 @@ class MpvController:
         return response is not None and response.get("error") == "success"
 
     def play_file(self, path: str, seek_seconds: float = 0,
+                  end_seconds: float = 0,
                   audio_file: Optional[str] = None) -> bool:
         """
         Load and play a file.
@@ -308,15 +313,19 @@ class MpvController:
         Args:
             path: Path to the video file
             seek_seconds: Position to seek to after loading
+            end_seconds: Position to stop playback (0 = play to end of file)
             audio_file: Optional audio file to play alongside (e.g. for images)
 
         Returns:
             True if successful
         """
-        # Build options — use start= to seek during load (no flash of position 0)
+        # Build options — use start=/end= to define the exact segment.
+        # mpv fires end-file with reason=eof when end= is reached.
         options_parts = []
         if seek_seconds > 0:
             options_parts.append(f"start={seek_seconds}")
+        if end_seconds > 0:
+            options_parts.append(f"end={end_seconds}")
         if audio_file:
             options_parts.append(f"audio-file={audio_file}")
             options_parts.append("image-display-duration=inf")
