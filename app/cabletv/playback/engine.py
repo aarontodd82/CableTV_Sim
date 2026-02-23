@@ -243,6 +243,12 @@ class PlaybackEngine:
         target_now = None  # set by play_file sync; used for transition timer in Phase 3
         if play_action == "no_content":
             self._show_no_content_message(channel_number)
+            # Always schedule a retry — a failed API call (network hiccup)
+            # must not kill the playback loop permanently.
+            with self._lock:
+                self._timer = threading.Timer(5.0, self._on_content_end)
+                self._timer.daemon = True
+                self._timer.start()
             return False
 
         elif play_action == "info_bumper":
