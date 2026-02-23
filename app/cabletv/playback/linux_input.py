@@ -23,18 +23,18 @@ def _find_keyboard() -> evdev.InputDevice | None:
     """
     devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
 
-    # First pass: devices with "Keyboard" in name AND letter keys
-    # (filters out mouse "keyboard" devices that only have media keys)
+    # First pass: devices with "Keyboard" in name AND letter keys,
+    # but NOT mouse devices (mice can expose a "Keyboard" sub-device)
     for dev in devices:
-        if "Keyboard" in dev.name:
+        if "Keyboard" in dev.name and "Mouse" not in dev.name:
             caps = dev.capabilities()
             key_caps = caps.get(evdev.ecodes.EV_KEY, [])
             if evdev.ecodes.KEY_A in key_caps:
                 return dev
 
-    # Second pass: any device with "Keyboard" in name
+    # Second pass: any device with "Keyboard" in name (excluding mice)
     for dev in devices:
-        if "Keyboard" in dev.name:
+        if "Keyboard" in dev.name and "Mouse" not in dev.name:
             return dev
 
     # Third pass: any device with arrow keys and digit keys
