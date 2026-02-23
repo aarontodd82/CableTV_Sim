@@ -125,8 +125,18 @@ class MpvController:
                 sock_path.unlink()
 
         try:
+            # On Linux DRM mode, mpv needs direct access to the TTY for
+            # keyboard input, so open /dev/tty as stdin explicitly
+            stdin_source = subprocess.DEVNULL
+            if sys.platform != "win32":
+                try:
+                    stdin_source = open("/dev/tty", "r")
+                except OSError:
+                    pass  # Fallback to DEVNULL if no TTY (e.g. SSH-only)
+
             self._process = subprocess.Popen(
                 cmd,
+                stdin=stdin_source,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
