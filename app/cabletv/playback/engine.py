@@ -1008,6 +1008,9 @@ class PlaybackEngine:
         """Called when current content/commercial/bumper ends."""
         channel = None
         with self._lock:
+            # If eof event already started a transition, don't double up
+            if self._eof_transition_pending:
+                return
             if self._current_channel:
                 channel = self._current_channel
                 self._timer = None
