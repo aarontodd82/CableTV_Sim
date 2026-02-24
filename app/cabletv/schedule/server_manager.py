@@ -8,6 +8,7 @@ import threading
 from typing import Optional
 
 from .engine import ScheduleEngine
+from ..utils.time_utils import get_slot_number
 
 
 class ServerScheduleManager:
@@ -51,6 +52,7 @@ class ServerScheduleManager:
             if key in self._consumed:
                 return False
             self._consumed[key] = content_id
+            self._prune_consumed()
 
         self._original_advance(
             self.engine, channel_number, group_key, num_items,
@@ -58,6 +60,22 @@ class ServerScheduleManager:
             advance_by=advance_by,
         )
         return True
+
+    def _prune_consumed(self) -> None:
+        """Remove consumed-slot entries older than 6 hours.
+
+        Must be called with self._lock held. Keeps the dict bounded
+        during long-running server sessions.
+        """
+        from datetime import datetime
+        now = datetime.now()
+        cutoff_slot = get_slot_number(
+            now, self.engine.epoch, self.engine.slot_duration
+        ) - (6 * 60 // self.engine.slot_duration)
+        self._consumed = {
+            k: v for k, v in self._consumed.items()
+            if k[1] >= cutoff_slot
+        }
 
     def get_all_positions(self) -> dict[str, int]:
         """Get all series positions as a flat dict for API response.

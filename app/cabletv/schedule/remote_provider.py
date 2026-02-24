@@ -21,14 +21,9 @@ class RemoteScheduleProvider:
     after mpv loads the file) compensates for any API latency.
     """
 
-    def __init__(self, server_url: str, clock_offset: float = 0.0,
-                 epoch: str = "2024-01-01T00:00:00",
-                 slot_duration: int = 30):
+    def __init__(self, server_url: str):
         self._server_url = server_url
-        self._clock_offset = clock_offset
         self._session = requests.Session()
-        self.epoch = epoch
-        self.slot_duration = slot_duration
 
     def what_is_on(self, channel_number: int,
                    when: Optional[datetime] = None) -> Optional[NowPlaying]:

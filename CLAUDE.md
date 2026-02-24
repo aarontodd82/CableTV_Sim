@@ -39,8 +39,7 @@ app/cabletv/
 ├── network/
 │   ├── discovery.py     → mDNS server advertisement + client discovery
 │   ├── client.py        → Server connection + API client
-│   ├── segment_provider.py → HttpSegmentProvider (API) + RemoteSegmentProvider (SMB)
-│   └── smb_instructions.py → First-run share setup instructions (legacy)
+│   └── segment_provider.py → HttpSegmentProvider (fetches segments via server API)
 ├── interface/
 │   ├── web.py           → Flask web UI + remote control
 │   └── server_api.py    → Server API endpoints for remote clients
@@ -289,7 +288,7 @@ schedule/server_manager.py   → Consumed-slot tracking, prevents double-advance
 interface/server_api.py      → All /api/server/* endpoints + NowPlaying serialization
 network/client.py            → Server connection, mDNS discovery, clock offset
 network/discovery.py         → mDNS advertisement + discovery
-network/segment_provider.py  → HttpSegmentProvider (API) + RemoteSegmentProvider (SMB legacy)
+network/segment_provider.py  → HttpSegmentProvider (fetches segments via server API)
 ```
 
 ### Dependencies
@@ -299,7 +298,7 @@ network/segment_provider.py  → HttpSegmentProvider (API) + RemoteSegmentProvid
 
 ## Guide Channel (Ch14)
 
-Prevue-style scrolling grid with promo clips. `guide/generator.py` renders segments in background, played by mpv with loop. Playback engine polls for new segments. Guide gets its own ScheduleEngine instance to avoid block cache contamination with the playback engine.
+Prevue-style scrolling grid with promo clips. `guide/generator.py` renders segments in background, played by mpv with loop. Playback engine polls for new segments. Guide shares the playback ScheduleEngine so the grid matches what actually plays.
 
 ## Weather Channel (Ch26)
 
@@ -321,6 +320,6 @@ Always run `python -m cabletv` commands via Bash and paste the full output. For 
 5. Relative paths in database
 6. Two-tier selection — equal weight per series, not per episode
 7. Sequential episodes — position advances only on actual playback
-8. Guide engine separate from playback engine (prevents cache contamination)
+8. Guide shares playback ScheduleEngine (grid matches what actually plays)
 9. Remote mode is a thin API client — server is single source of truth
 10. Remote mode is pure HTTP — no SMB/network share required

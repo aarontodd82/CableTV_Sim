@@ -80,11 +80,6 @@ class CableTVSystem:
                 )
             self.schedule.advance_position = _server_advance
 
-            # Show SMB share instructions on first run
-            from .network.smb_instructions import should_show_instructions, print_smb_instructions
-            if should_show_instructions():
-                print_smb_instructions()
-
         # Create playback engine
         self.playback = PlaybackEngine(self.config, self.schedule)
         print("  Playback engine ready")
@@ -182,9 +177,6 @@ class CableTVSystem:
         # No local engine — all schedule queries go to the server.
         self.schedule = RemoteScheduleProvider(
             self._server_connection.server_url,
-            clock_offset=clock_offset,
-            epoch=self.config.schedule.epoch,
-            slot_duration=self.config.schedule.slot_duration,
         )
         print("  Schedule provider ready (server API)")
 
