@@ -106,8 +106,9 @@ class MpvController:
             # skip autocrop (per-frame analysis), reduce cache/readahead
             cmd += [
                 "--hr-seek=no",
-                "--cache-secs=5",
-                "--demuxer-readahead-secs=2",
+                "--cache-secs=3",
+                "--demuxer-readahead-secs=1",
+                "--cache-pause-wait=1",
             ]
         else:
             cmd += [
@@ -375,19 +376,11 @@ class MpvController:
         if response is None:
             return False
 
-        # Wait for file to load (poll at 50ms intervals, max 3s wall time).
-        # Deadline-based so a slow IPC response can't balloon this to minutes.
-        deadline = time.time() + 3.0
-        while time.time() < deadline:
-            time.sleep(0.05)
-            pos = self._get_property("time-pos")
-            if pos is not None:
-                break
-            if not self.is_connected:
-                break  # IPC lost — stop polling, loadfile already sent
-
-        # Ensure playback is not paused — keep-open=yes leaves mpv paused
-        # when a file ends, and loadfile may inherit that paused state
+        # Unpause immediately — keep-open=yes leaves mpv paused when a
+        # file ends, and loadfile may inherit that state.  mpv processes
+        # commands in order, so this applies after the loadfile completes.
+        # No polling needed: the event listener (eof-reached, end-file)
+        # handles transitions and errors.
         self._set_property("pause", False)
 
         return True
