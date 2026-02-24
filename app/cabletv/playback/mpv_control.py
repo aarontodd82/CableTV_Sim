@@ -101,11 +101,13 @@ class MpvController:
         ]
 
         if on_pi:
-            # Pi: skip loudnorm (CPU-heavy real-time audio filter),
-            # skip hr-seek (decode from keyframe is slow on Pi's decoder),
-            # skip autocrop (per-frame analysis), reduce cache/readahead
+            # Pi: keep hr-seek off (decode from keyframe is slow on Pi),
+            # but re-enable loudnorm and autocrop now that play_file
+            # no longer blocks on the polling loop
             cmd += [
+                "--af=loudnorm=I=-24:TP=-2:LRA=11",
                 "--hr-seek=no",
+                f"--script={autocrop_script}",
                 "--cache-secs=3",
                 "--demuxer-readahead-secs=1",
                 "--cache-pause-wait=1",
