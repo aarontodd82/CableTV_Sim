@@ -42,11 +42,12 @@ class MpvController:
         self._next_observe_id = 1
         self._observe_id_to_name: dict[int, str] = {}  # observe_id → property name
 
-        # Watchdog (periodic health check)
+        # Watchdog (periodic health check — IPC-free, uses event-fed position)
         self._watchdog_thread: Optional[threading.Thread] = None
         self._watchdog_stop = threading.Event()
         self._watchdog_callback: Optional[Callable] = None
         self._watchdog_last_pos: Optional[float] = None
+        self._watchdog_last_pos_time: float = 0.0  # time.time() of last position update
         self._watchdog_stall_count = 0
 
     @property
@@ -716,9 +717,13 @@ class MpvController:
                        callback: Callable[[str], None]) -> None:
         """Start a periodic health-check thread.
 
+        The watchdog makes NO IPC calls — it only checks process.poll()
+        and position data fed from the event listener (observe_property
+        for time-pos). This avoids _ipc_lock contention with user commands.
+
         The callback is called with a reason string:
         - "process_dead" — mpv process exited unexpectedly
-        - "playback_stalled" — time-pos hasn't progressed for 2+ checks
+        - "playback_stalled" — no position update for 2+ checks
 
         Args:
             interval: Seconds between checks (e.g. 5.0)
@@ -730,6 +735,7 @@ class MpvController:
         self._watchdog_stop.clear()
         self._watchdog_callback = callback
         self._watchdog_last_pos = None
+        self._watchdog_last_pos_time = time.time()
         self._watchdog_stall_count = 0
 
         self._watchdog_thread = threading.Thread(
@@ -737,11 +743,26 @@ class MpvController:
             daemon=True, name="mpv-watchdog")
         self._watchdog_thread.start()
 
+    def _on_position_update(self, name: str, value) -> None:
+        """Called by event listener when time-pos changes.
+
+        Updates watchdog tracking without any IPC lock contention.
+        mpv coalesces property-change events, so this fires ~1/sec.
+        """
+        if value is not None:
+            self._watchdog_last_pos = value
+            self._watchdog_last_pos_time = time.time()
+            self._watchdog_stall_count = 0
+
     def _watchdog_loop(self, interval: float) -> None:
-        """Periodic health check: process alive + playback progressing."""
+        """Periodic health check: process alive + position fed from events.
+
+        No IPC calls — all position data comes from observe_property
+        on the event connection, avoiding _ipc_lock contention.
+        """
         while not self._watchdog_stop.wait(timeout=interval):
             try:
-                # Check 1: process alive
+                # Check 1: process alive (cheap, no IPC)
                 if self._process and self._process.poll() is not None:
                     print("Watchdog: mpv process dead")
                     self._watchdog_last_pos = None
@@ -750,43 +771,24 @@ class MpvController:
                         self._watchdog_callback("process_dead")
                     continue
 
-                # Check 2: playback progressing
-                # Skip if no process or not connected (startup/shutdown)
-                if not self.is_running or not self.is_connected:
-                    self._watchdog_last_pos = None
+                # Check 2: position progressing (from event-fed data, no IPC)
+                if not self.is_running:
                     self._watchdog_stall_count = 0
                     continue
 
-                pos = self._get_property("time-pos")
-                paused = self._get_property("pause")
-
-                if pos is None:
-                    # No position — mpv is idle or between files, not a stall
-                    self._watchdog_last_pos = None
-                    self._watchdog_stall_count = 0
-                    continue
-
-                if paused:
-                    # Paused is intentional (keep-open=yes at segment end)
-                    self._watchdog_last_pos = pos
-                    self._watchdog_stall_count = 0
-                    continue
-
-                if (self._watchdog_last_pos is not None
-                        and abs(pos - self._watchdog_last_pos) < 0.1):
+                elapsed = time.time() - self._watchdog_last_pos_time
+                if self._watchdog_last_pos is not None and elapsed > interval:
+                    # No position update in over one interval — possible stall
                     self._watchdog_stall_count += 1
                     if self._watchdog_stall_count >= 2:
-                        print(f"Watchdog: playback stalled at {pos:.1f}s "
-                              f"({self._watchdog_stall_count} checks)")
+                        print(f"Watchdog: no position update for "
+                              f"{elapsed:.0f}s (stall detected)")
                         self._watchdog_stall_count = 0
                         self._watchdog_last_pos = None
                         if self._watchdog_callback:
                             self._watchdog_callback("playback_stalled")
-                        continue
                 else:
                     self._watchdog_stall_count = 0
-
-                self._watchdog_last_pos = pos
 
             except Exception as e:
                 print(f"Watchdog error: {e}")
@@ -794,6 +796,7 @@ class MpvController:
     def reset_watchdog(self) -> None:
         """Reset watchdog stall tracking (call on intentional position changes)."""
         self._watchdog_last_pos = None
+        self._watchdog_last_pos_time = time.time()
         self._watchdog_stall_count = 0
 
     def _stop_watchdog(self) -> None:

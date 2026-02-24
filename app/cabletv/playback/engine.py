@@ -117,11 +117,12 @@ class PlaybackEngine:
         # Start event listener (second IPC connection for eof/error events)
         if self.mpv.start_event_listener():
             self.mpv.observe_property("eof-reached", self._on_eof_reached)
+            self.mpv.observe_property("time-pos", self.mpv._on_position_update)
             self.mpv.on_event("end-file", self._on_end_file)
         else:
             print("Event listener unavailable — timer-only transitions")
 
-        # Start watchdog (periodic health check)
+        # Start watchdog (process alive + event-fed position check, no IPC calls)
         self.mpv.start_watchdog(interval=5.0, callback=self._on_watchdog_alert)
 
         return True
@@ -1123,6 +1124,7 @@ class PlaybackEngine:
         # Re-register event listener
         if self.mpv.start_event_listener():
             self.mpv.observe_property("eof-reached", self._on_eof_reached)
+            self.mpv.observe_property("time-pos", self.mpv._on_position_update)
             self.mpv.on_event("end-file", self._on_end_file)
 
         # Restart watchdog
