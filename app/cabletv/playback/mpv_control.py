@@ -298,7 +298,12 @@ class MpvController:
                     if wait_response:
                         response_data = b""
                         while True:
-                            chunk = self._socket.recv(4096)
+                            try:
+                                chunk = self._socket.recv(4096)
+                            except socket.timeout:
+                                # mpv is busy (loading file, buffering) —
+                                # return None but keep the connection alive
+                                return None
                             if not chunk:
                                 break
                             response_data += chunk
