@@ -571,6 +571,10 @@ class MpvController:
         self._send_event_command(
             {"command": ["observe_property", observe_id, name]})
 
+    def on_property(self, name: str, callback: Callable) -> None:
+        """Register a callback for an already-observed property."""
+        self._property_callbacks.setdefault(name, []).append(callback)
+
     def _send_event_command(self, command_dict: dict) -> None:
         """Fire-and-forget write on the event connection."""
         try:

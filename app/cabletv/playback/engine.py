@@ -54,6 +54,13 @@ class PlaybackEngine:
         self._bumper_bg_path: Optional[Path] = None
         self._eof_transition_pending = False  # Prevents double-transition (event + timer race)
         self._fullscreen = True  # Stored for mpv restart
+        # Adaptive load compensation — measures mpv file-load delay and
+        # pre-compensates future seeks so remote clients stay in sync.
+        self._load_compensation: float = 0.0     # EMA of mpv load delay (seconds)
+        self._load_sample_count: int = 0          # number of measurements taken
+        self._play_file_wall_time: float = 0.0    # wall time when play_file() was called
+        self._play_file_seek_pos: float = 0.0     # seek position sent to play_file()
+        self._awaiting_load_measure: bool = False  # waiting for first time-pos
 
     def _now(self) -> datetime:
         """Get current time adjusted for clock offset (remote sync)."""
@@ -117,6 +124,7 @@ class PlaybackEngine:
         if self.mpv.start_event_listener():
             self.mpv.observe_property("eof-reached", self._on_eof_reached)
             self.mpv.observe_property("time-pos", self.mpv._on_position_update)
+            self.mpv.on_property("time-pos", self._on_load_measure)
             self.mpv.on_event("end-file", self._on_end_file)
         else:
             print("Event listener unavailable — timer-only transitions")
@@ -286,10 +294,14 @@ class PlaybackEngine:
                 end_pos = (now_playing.seek_position
                            + now_playing.remaining_seconds)
             # Adjust seek forward by time elapsed since the server computed
-            # it (API round-trip + advance call + setup).  This way the
-            # start= position is current when mpv opens the stream, and we
-            # don't need a second seek that triggers extra HTTP requests.
-            seek_position += time.time() - query_time
+            # it (API round-trip + advance call + setup) PLUS the learned
+            # mpv load delay (HTTP connection, buffering, decode).  This way
+            # the start= position is current when mpv finishes loading, and
+            # we don't need a second seek that triggers extra HTTP requests.
+            seek_position += time.time() - query_time + self._load_compensation
+            self._play_file_wall_time = time.time()
+            self._play_file_seek_pos = seek_position
+            self._awaiting_load_measure = True
             success = self.mpv.play_file(
                 str(file_path), seek_seconds=seek_position,
                 end_seconds=end_pos)
@@ -1022,6 +1034,37 @@ class PlaybackEngine:
 
     # ── Event-driven transition handlers ────────────────────────
 
+    def _on_load_measure(self, name: str, value) -> None:
+        """Measure mpv load delay from the first time-pos after play_file().
+
+        Compares where mpv actually is vs. where it should be based on
+        wall-clock time since play_file(). Updates an EMA so future
+        seeks pre-compensate for load delay.
+        """
+        if not self._awaiting_load_measure or value is None:
+            return
+
+        # Sanity check: position should be near what we requested
+        if abs(value - self._play_file_seek_pos) > 10:
+            return  # Stale event from previous file
+
+        self._awaiting_load_measure = False
+
+        wall_elapsed = time.time() - self._play_file_wall_time
+        expected_pos = self._play_file_seek_pos + wall_elapsed
+        uncompensated = expected_pos - value  # positive = mpv is behind
+
+        if uncompensated < 0 or uncompensated > 5:
+            return  # Outlier, ignore
+
+        measured_total = self._load_compensation + uncompensated
+
+        if self._load_sample_count == 0:
+            self._load_compensation = measured_total
+        else:
+            self._load_compensation = 0.3 * measured_total + 0.7 * self._load_compensation
+        self._load_sample_count += 1
+
     def _on_eof_reached(self, name: str, value) -> None:
         """Called by event listener when eof-reached property changes.
 
@@ -1127,6 +1170,7 @@ class PlaybackEngine:
         if self.mpv.start_event_listener():
             self.mpv.observe_property("eof-reached", self._on_eof_reached)
             self.mpv.observe_property("time-pos", self.mpv._on_position_update)
+            self.mpv.on_property("time-pos", self._on_load_measure)
             self.mpv.on_event("end-file", self._on_end_file)
 
         # Restart watchdog
