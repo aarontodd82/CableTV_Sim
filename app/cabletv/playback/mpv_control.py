@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional, Any, Callable
 
 from ..config import Config
-from ..platform import get_mpv_path, get_mpv_ipc_address, configure_display
+from ..platform import get_mpv_path, get_mpv_ipc_address, configure_display, is_pi
 
 
 class MpvController:
@@ -83,6 +83,8 @@ class MpvController:
         # Keyboard bindings Lua script (channel up/down, digits, info, quit)
         keybinds_script = Path(__file__).resolve().parent / "keybinds.lua"
 
+        on_pi = is_pi()
+
         cmd = [
             mpv_path,
             f"--input-ipc-server={self._ipc_address}",
@@ -93,19 +95,31 @@ class MpvController:
             "--osd-duration=2000",
             "--osd-font=VCR OSD Mono",
             "--osd-font-size=38",
-            "--af=loudnorm=I=-24:TP=-2:LRA=11",
-            # Precise seeking — start= defaults to keyframe seek, which can
-            # land 0-5s before the target.  hr-seek=yes decodes from the prior
-            # keyframe to the exact frame, keeping remotes in sync.
-            "--hr-seek=yes",
-            f"--script={autocrop_script}",
             f"--script={keybinds_script}",
             f"--script-opts=cabletv-port={self.config.web.port}",
-            # Cache settings for network share playback
             "--cache=yes",
-            "--cache-secs=10",
-            "--demuxer-readahead-secs=3",
         ]
+
+        if on_pi:
+            # Pi: skip loudnorm (CPU-heavy real-time audio filter),
+            # skip hr-seek (decode from keyframe is slow on Pi's decoder),
+            # skip autocrop (per-frame analysis), reduce cache/readahead
+            cmd += [
+                "--hr-seek=no",
+                "--cache-secs=5",
+                "--demuxer-readahead-secs=2",
+            ]
+        else:
+            cmd += [
+                "--af=loudnorm=I=-24:TP=-2:LRA=11",
+                # Precise seeking — start= defaults to keyframe seek, which can
+                # land 0-5s before the target.  hr-seek=yes decodes from the prior
+                # keyframe to the exact frame, keeping remotes in sync.
+                "--hr-seek=yes",
+                f"--script={autocrop_script}",
+                "--cache-secs=10",
+                "--demuxer-readahead-secs=3",
+            ]
 
         # Add fullscreen or fixed window size
         if fullscreen:
