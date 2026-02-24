@@ -3,6 +3,7 @@
 import re
 import threading
 import time
+from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Callable, TYPE_CHECKING
@@ -56,8 +57,7 @@ class PlaybackEngine:
         self._fullscreen = True  # Stored for mpv restart
         # Adaptive load compensation — measures mpv file-load delay and
         # pre-compensates future seeks so remote clients stay in sync.
-        self._load_compensation: float = 0.0     # EMA of mpv load delay (seconds)
-        self._load_sample_count: int = 0          # number of measurements taken
+        self._load_samples: deque[float] = deque(maxlen=8)  # recent load delay measurements
         self._play_file_wall_time: float = 0.0    # wall time when play_file() was called
         self._play_file_seek_pos: float = 0.0     # seek position sent to play_file()
         self._awaiting_load_measure: bool = False  # waiting for first time-pos
@@ -298,7 +298,9 @@ class PlaybackEngine:
             # mpv load delay (HTTP connection, buffering, decode).  This way
             # the start= position is current when mpv finishes loading, and
             # we don't need a second seek that triggers extra HTTP requests.
-            seek_position += time.time() - query_time + self._load_compensation
+            load_comp = (sum(self._load_samples) / len(self._load_samples)
+                         if self._load_samples else 0.0)
+            seek_position += time.time() - query_time + load_comp
             self._play_file_wall_time = time.time()
             self._play_file_seek_pos = seek_position
             self._awaiting_load_measure = True
@@ -1038,8 +1040,8 @@ class PlaybackEngine:
         """Measure mpv load delay from the first time-pos after play_file().
 
         Compares where mpv actually is vs. where it should be based on
-        wall-clock time since play_file(). Updates an EMA so future
-        seeks pre-compensate for load delay.
+        wall-clock time since play_file(). Appends to a rolling window
+        so future seeks pre-compensate by the average load delay.
         """
         if not self._awaiting_load_measure or value is None:
             return
@@ -1051,19 +1053,16 @@ class PlaybackEngine:
         self._awaiting_load_measure = False
 
         wall_elapsed = time.time() - self._play_file_wall_time
-        expected_pos = self._play_file_seek_pos + wall_elapsed
-        uncompensated = expected_pos - value  # positive = mpv is behind
+        playback_advanced = value - self._play_file_seek_pos
+        # How long mpv spent loading instead of playing.
+        # This is always the full load delay regardless of compensation
+        # (compensation shifts the seek position, not the load time).
+        measured_delay = wall_elapsed - playback_advanced
 
-        if uncompensated < 0 or uncompensated > 5:
+        if measured_delay < 0 or measured_delay > 5:
             return  # Outlier, ignore
 
-        measured_total = self._load_compensation + uncompensated
-
-        if self._load_sample_count == 0:
-            self._load_compensation = measured_total
-        else:
-            self._load_compensation = 0.3 * measured_total + 0.7 * self._load_compensation
-        self._load_sample_count += 1
+        self._load_samples.append(measured_delay)
 
     def _on_eof_reached(self, name: str, value) -> None:
         """Called by event listener when eof-reached property changes.
