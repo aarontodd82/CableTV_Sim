@@ -149,6 +149,10 @@ class PlaybackEngine:
         Returns:
             True if successful
         """
+        t0 = time.time()
+        _tlog = lambda label: print(f"  tune_to [{channel_number}] {label}: "
+                                     f"{(time.time()-t0)*1000:.0f}ms")
+
         # Reset eof transition flag so the new segment can fire events cleanly
         with self._lock:
             self._eof_transition_pending = False
@@ -165,6 +169,7 @@ class PlaybackEngine:
         self.mpv.remove_osd_overlay(self._NEXT_EP_OVERLAY_ID)
         self.mpv.remove_osd_overlay(self._WEATHER_CLOCK_OVERLAY_ID)
         self.mpv.remove_osd_overlay(self._INFO_BUMPER_OVERLAY_ID)
+        _tlog("overlays cleared")
 
         # Check if this is the guide channel
         if channel_number == self.config.guide.channel_number and self.config.guide.enabled:
@@ -190,6 +195,7 @@ class PlaybackEngine:
             # can adjust seek_position for elapsed time before mpv opens.
             query_time = time.time()
             now_playing = self.schedule.what_is_on(channel_number)
+            _tlog("what_is_on")
 
             # Advance series position on first sight — if you see an episode
             # playing, it's consumed and the next selection will be the next episode.
@@ -260,6 +266,7 @@ class PlaybackEngine:
                     advance_by=pack_count)
             except Exception as e:
                 print(f"Error advancing series position: {e}")
+            _tlog("advance_position")
 
         # Phase 2: Execute mpv commands (NO lock — IPC has its own lock)
         target_now = None  # set by play_file sync; used for transition timer in Phase 3
@@ -291,9 +298,11 @@ class PlaybackEngine:
             # start= position is current when mpv opens the stream, and we
             # don't need a second seek that triggers extra HTTP requests.
             seek_position += time.time() - query_time
+            _tlog("pre-play_file")
             success = self.mpv.play_file(
                 str(file_path), seek_seconds=seek_position,
                 end_seconds=end_pos)
+            _tlog("play_file done")
             if not success:
                 print(f"Failed to play {file_path}")
             else:
@@ -395,6 +404,7 @@ class PlaybackEngine:
         if self._on_content_change and now_playing:
             self._on_content_change(now_playing)
 
+        _tlog("done")
         return True
 
     def _show_channel_osd(self, channel_number: int,
