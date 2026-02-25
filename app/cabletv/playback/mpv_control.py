@@ -165,8 +165,10 @@ class MpvController:
             cmd.append(f"--drm-connector={display_config['drm_connector']}")
 
         # DRM output resolution (Linux only, e.g. "1024x768")
+        # Skip for composite — it uses fixed TV-standard resolution
         resolution = self.config.playback.resolution
-        if resolution and display_config.get("video_output") == "drm":
+        if resolution and display_config.get("video_output") == "drm" \
+                and display_config.get("drm_connector") != "Composite-1":
             cmd.append(f"--drm-mode={resolution}")
 
         # Clean up stale Unix socket file from previous run
