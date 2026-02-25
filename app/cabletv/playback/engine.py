@@ -284,7 +284,6 @@ class PlaybackEngine:
             self._show_info_bumper(channel_number, now_playing.remaining_seconds)
 
         elif play_action == "play_file":
-            self.mpv.set_volume(100)
             # Compute the exact file position where this segment ends.
             # mpv's end= option stops playback precisely here.
             if now_playing.is_commercial and now_playing.commercial:
@@ -447,9 +446,6 @@ class PlaybackEngine:
             audio_file = music_path
 
         self.mpv.play_file(str(bg_path), audio_file=audio_file)
-
-        if audio_file:
-            self.mpv.set_volume(50)
 
         if osd_text:
             self.mpv.show_osd_message(osd_text, osd_duration_ms)
@@ -741,7 +737,6 @@ class PlaybackEngine:
         seek = elapsed % segment_duration if segment_duration > 0 else 0
 
         # Play the segment file, looping so it never stops between polls
-        self.mpv.set_volume(100)
         self.mpv._set_property("loop-file", "inf")
         success = self.mpv.play_file(str(file_path), seek_seconds=seek)
         if not success:
@@ -900,7 +895,6 @@ class PlaybackEngine:
         elapsed = (self._now() - generation_time).total_seconds()
         seek = elapsed % segment_duration if segment_duration > 0 else 0
 
-        self.mpv.set_volume(100)
         self.mpv._set_property("loop-file", "inf")
         success = self.mpv.play_file(str(file_path), seek_seconds=seek)
         if not success:

@@ -98,6 +98,8 @@ class MpvController:
             f"--script={keybinds_script}",
             f"--script-opts=cabletv-port={self.config.web.port}",
             "--cache=yes",
+            "--no-input-default-bindings",
+            "--volume=75",
         ]
 
         if on_pi:

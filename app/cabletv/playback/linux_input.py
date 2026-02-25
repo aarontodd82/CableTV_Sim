@@ -111,6 +111,32 @@ class LinuxKeyboardListener:
             except Exception:
                 pass
 
+    def _volume_adjust(self, delta: int) -> None:
+        """Adjust mpv volume by delta and show OSD."""
+        if self._mpv:
+            try:
+                vol = self._mpv.get_volume()
+                if vol is not None:
+                    new_vol = max(0, min(100, vol + delta))
+                    self._mpv.set_volume(new_vol)
+                    self._show_osd(f"Volume: {new_vol}")
+            except Exception:
+                pass
+
+    def _toggle_mute(self) -> None:
+        """Toggle mpv mute and show OSD."""
+        if self._mpv:
+            try:
+                muted = self._mpv._get_property("mute")
+                self._mpv._set_property("mute", not muted)
+                if not muted:
+                    self._show_osd("Muted")
+                else:
+                    vol = self._mpv.get_volume()
+                    self._show_osd(f"Volume: {vol}")
+            except Exception:
+                pass
+
     def _commit_channel(self) -> None:
         """Commit buffered digits as a channel number."""
         if self._digit_timer:
@@ -164,8 +190,20 @@ class LinuxKeyboardListener:
                     self._api_post("/api/channel/up")
                 elif code == evdev.ecodes.KEY_DOWN:
                     self._api_post("/api/channel/down")
+                elif code == evdev.ecodes.KEY_LEFT:
+                    self._volume_adjust(-5)
+                elif code == evdev.ecodes.KEY_RIGHT:
+                    self._volume_adjust(5)
+                elif code == evdev.ecodes.KEY_M:
+                    self._toggle_mute()
                 elif code == evdev.ecodes.KEY_I:
                     self._api_post("/api/info")
+                elif code == evdev.ecodes.KEY_Q:
+                    if self._mpv:
+                        try:
+                            self._mpv.quit()
+                        except Exception:
+                            pass
                 elif code in self._DIGIT_KEYS:
                     self._on_digit(self._DIGIT_KEYS[code])
         except Exception as e:

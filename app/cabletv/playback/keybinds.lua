@@ -81,6 +81,32 @@ for i = 0, 9 do
 end
 
 -- ============================================================
+-- Volume: Left/Right arrows, M to mute
+-- ============================================================
+mp.add_forced_key_binding("LEFT", "cabletv-vol-down", function()
+    mp.commandv("add", "volume", "-5")
+    local vol = mp.get_property_number("volume", 100)
+    mp.osd_message(string.format("Volume: %d", vol), 1500)
+end, {repeatable = true})
+
+mp.add_forced_key_binding("RIGHT", "cabletv-vol-up", function()
+    mp.commandv("add", "volume", "5")
+    local vol = mp.get_property_number("volume", 100)
+    mp.osd_message(string.format("Volume: %d", vol), 1500)
+end, {repeatable = true})
+
+mp.add_forced_key_binding("m", "cabletv-mute", function()
+    mp.commandv("cycle", "mute")
+    local muted = mp.get_property_bool("mute", false)
+    if muted then
+        mp.osd_message("Muted", 1500)
+    else
+        local vol = mp.get_property_number("volume", 100)
+        mp.osd_message(string.format("Volume: %d", vol), 1500)
+    end
+end, {repeatable = false})
+
+-- ============================================================
 -- Info overlay
 -- ============================================================
 mp.add_forced_key_binding("i", "cabletv-info", function()
