@@ -86,23 +86,23 @@ end
 mp.add_forced_key_binding("LEFT", "cabletv-vol-down", function()
     mp.command("no-osd add volume -5")
     local vol = mp.get_property_number("volume", 100)
-    mp.osd_message(string.format("Volume: %d", vol), 1500)
+    mp.osd_message(string.format("Volume: %d", vol), 1.5)
 end, {repeatable = true})
 
 mp.add_forced_key_binding("RIGHT", "cabletv-vol-up", function()
     mp.command("no-osd add volume 5")
     local vol = mp.get_property_number("volume", 100)
-    mp.osd_message(string.format("Volume: %d", vol), 1500)
+    mp.osd_message(string.format("Volume: %d", vol), 1.5)
 end, {repeatable = true})
 
 mp.add_forced_key_binding("m", "cabletv-mute", function()
     mp.command("no-osd cycle mute")
     local muted = mp.get_property_bool("mute", false)
     if muted then
-        mp.osd_message("Muted", 1500)
+        mp.osd_message("Muted", 1.5)
     else
         local vol = mp.get_property_number("volume", 100)
-        mp.osd_message(string.format("Volume: %d", vol), 1500)
+        mp.osd_message(string.format("Volume: %d", vol), 1.5)
     end
 end, {repeatable = false})
 
