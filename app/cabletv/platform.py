@@ -154,6 +154,7 @@ def configure_display() -> dict:
             "video_output": "drm",  # Direct rendering for Pi
             "hwdec": "v4l2m2m",     # Hardware decoding on Pi
             "gpu_context": "drm",
+            "drm_connector": "Composite-1",
         })
     elif sys.platform == "win32":
         config.update({

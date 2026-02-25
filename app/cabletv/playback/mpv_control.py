@@ -160,6 +160,10 @@ class MpvController:
         if display_config.get("hwdec"):
             cmd.append(f"--hwdec={display_config['hwdec']}")
 
+        # DRM connector (e.g. "Composite-1" for CRT output)
+        if display_config.get("drm_connector"):
+            cmd.append(f"--drm-connector={display_config['drm_connector']}")
+
         # DRM output resolution (Linux only, e.g. "1024x768")
         resolution = self.config.playback.resolution
         if resolution and display_config.get("video_output") == "drm":
